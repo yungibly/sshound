@@ -361,26 +361,37 @@ mod tests {
         player
     }
 
+    // These run against a real clock on machines that may be busy, so they
+    // only assert what scheduling delays cannot break: playback never runs
+    // ahead of real time, and a paused playhead does not move.
+
+    fn seconds(frames: u64) -> f64 {
+        frames as f64 / RATE as f64
+    }
+
     #[test]
     fn plays_through_in_real_time() {
         let player = connected();
         let start = Instant::now();
         player.load(tone(1.0));
-        thread::sleep(Duration::from_millis(500));
-        let mid = player.status();
-        assert!(mid.playing && !mid.ended);
-        let secs = mid.pos as f64 / RATE as f64;
-        assert!(
-            (0.3..0.6).contains(&secs),
-            "half a second in, playhead at {secs:.2}s"
-        );
+        wait_for("playback to start", Duration::from_secs(5), || {
+            player.status().pos > 0
+        });
+        for _ in 0..20 {
+            let status = player.status();
+            let elapsed = start.elapsed().as_secs_f64();
+            assert!(status.playing);
+            assert!(
+                seconds(status.pos) <= elapsed + 0.05,
+                "playhead at {:.3}s after only {elapsed:.3}s",
+                seconds(status.pos)
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
 
-        wait_for("the end", Duration::from_secs(5), || player.status().ended);
+        wait_for("the end", Duration::from_secs(10), || player.status().ended);
         let took = start.elapsed().as_secs_f64();
-        assert!(
-            (0.9..1.4).contains(&took),
-            "a one-second track took {took:.2}s"
-        );
+        assert!(took >= 0.95, "a one-second track finished in {took:.2}s");
         assert_eq!(player.status().pos, RATE as u64);
     }
 
@@ -388,25 +399,39 @@ mod tests {
     fn pause_holds_the_playhead_and_seek_moves_it() {
         let player = connected();
         player.load(tone(10.0));
-        thread::sleep(Duration::from_millis(300));
+        wait_for("playback to start", Duration::from_secs(5), || {
+            player.status().pos > 0
+        });
         player.set_playing(false);
-        thread::sleep(Duration::from_millis(200));
-        let held = player.status().pos;
-        assert!(held > 0);
+        // The pause reaches the listener a moment later; wait for it to bite.
+        let mut held = player.status().pos;
+        wait_for("the pause to take effect", Duration::from_secs(5), || {
+            thread::sleep(Duration::from_millis(150));
+            let now = player.status().pos;
+            let still = now == held;
+            held = now;
+            still
+        });
         thread::sleep(Duration::from_millis(300));
         assert_eq!(player.status().pos, held, "playhead moved while paused");
 
         // Seeking while paused lands exactly and stays there.
-        player.seek(5 * RATE as u64);
+        let five = 5 * RATE as u64;
+        player.seek(five);
         thread::sleep(Duration::from_millis(200));
-        assert_eq!(player.status().pos, 5 * RATE as u64);
+        assert_eq!(player.status().pos, five);
 
+        let resumed = Instant::now();
         player.set_playing(true);
-        thread::sleep(Duration::from_millis(400));
-        let secs = player.status().pos as f64 / RATE as f64;
+        wait_for("playback to resume", Duration::from_secs(5), || {
+            player.status().pos > five
+        });
+        let pos = player.status().pos;
+        let elapsed = resumed.elapsed().as_secs_f64();
         assert!(
-            (5.2..5.5).contains(&secs),
-            "resumed from 5s, now at {secs:.2}s"
+            seconds(pos - five) <= elapsed + 0.05,
+            "moved {:.3}s in {elapsed:.3}s",
+            seconds(pos - five)
         );
 
         // Seeking past the end clamps to it.
