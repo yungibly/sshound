@@ -61,8 +61,11 @@ fn real_main() -> Result<()> {
     }
 }
 
+/// Named options as (name, value) pairs, and everything else.
+type Parsed = (Vec<(String, String)>, Vec<OsString>);
+
 /// Split `--name=value` / `--name value` style arguments from positional ones.
-fn parse(args: Vec<OsString>, flags: &[&str], options: &[&str]) -> Result<(Vec<(String, String)>, Vec<OsString>)> {
+fn parse(args: Vec<OsString>, flags: &[&str], options: &[&str]) -> Result<Parsed> {
     let mut named = Vec::new();
     let mut positional = Vec::new();
     let mut args = args.into_iter();

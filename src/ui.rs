@@ -50,6 +50,9 @@ enum Act {
     Next,
 }
 
+/// A finished decode, tagged with the load it belongs to.
+type Decoded = (u64, Result<Track>);
+
 enum View {
     Loading,
     Ready(Track),
@@ -65,7 +68,7 @@ struct App {
     player: Player,
     /// Percent.
     volume: u8,
-    decoded: (Sender<(u64, Result<Track>)>, Receiver<(u64, Result<Track>)>),
+    decoded: (Sender<Decoded>, Receiver<Decoded>),
     load_id: u64,
     bars: Vec<f32>,
     // Where things were last drawn, for the mouse.
@@ -204,10 +207,10 @@ impl App {
             Act::Next => {
                 self.step_to(1);
             }
+            // From the first file, "previous" restarts it.
+            Act::Prev if self.neighbour(-1).is_none() => self.player.seek(0),
             Act::Prev => {
-                if !self.step_to(-1) {
-                    self.player.seek(0);
-                }
+                self.step_to(-1);
             }
             _ => {}
         }

@@ -106,10 +106,11 @@ impl Envelope {
         let power = (0..slices)
             .map(|i| {
                 let (lo, hi) = (i * frames / slices, (i + 1) * frames / slices);
-                let sum: f64 = pcm[lo * FRAME..hi * FRAME]
-                    .chunks_exact(2)
-                    .map(|s| {
-                        let v = i16::from_le_bytes([s[0], s[1]]) as f64 / 32768.0;
+                let samples = pcm[lo * FRAME..hi * FRAME].as_chunks::<2>().0;
+                let sum: f64 = samples
+                    .iter()
+                    .map(|&s| {
+                        let v = i16::from_le_bytes(s) as f64 / 32768.0;
                         v * v
                     })
                     .sum();

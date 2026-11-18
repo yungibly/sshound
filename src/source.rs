@@ -57,9 +57,8 @@ impl Source {
 
     /// Append s16le stereo PCM.
     pub fn push(&mut self, pcm: &[u8]) {
-        self.queue.extend(pcm.chunks_exact(4).map(|f| {
-            [i16::from_le_bytes([f[0], f[1]]), i16::from_le_bytes([f[2], f[3]])]
-        }));
+        let frames = pcm.as_chunks::<4>().0.iter();
+        self.queue.extend(frames.map(|f| [i16::from_le_bytes([f[0], f[1]]), i16::from_le_bytes([f[2], f[3]])]));
     }
 
     pub fn queued(&self) -> usize {
@@ -298,7 +297,7 @@ mod tests {
         let tail = &out[2 * 2000..];
         let peak = tail.iter().fold(0f32, |m, x| m.max(x.abs()));
         assert!((peak - 0.5).abs() < 0.01, "peak {peak}");
-        let left: Vec<f32> = tail.chunks_exact(2).map(|f| f[0]).collect();
+        let left: Vec<f32> = tail.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
         let crossings = left.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
         let expected = left.len() as f32 / 44_100.0 * 1000.0;
         assert!((crossings as f32 - expected).abs() <= 1.0, "{crossings} vs {expected}");

@@ -2,7 +2,7 @@
 //! `pw-cat`/`aplay` child process elsewhere, or nowhere at all (`--null`).
 
 use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -132,6 +132,8 @@ impl Drop for Pump {
 
 #[cfg(not(target_os = "macos"))]
 fn spawn_player() -> Result<Child> {
+    use std::process::{Command, Stdio};
+
     let rate = RATE.to_string();
     let players: [(&str, Vec<&str>); 2] = [
         (
