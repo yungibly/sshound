@@ -2,7 +2,8 @@
 name = "sshound"
 version = "0.1.0"
 edition = "2024"
-description = "Play audio files from a remote shell: waveform in the terminal, sound on your own machine"
+description = "Play audio files from a remote shell and hear them on your own machine"
+repository = "https://github.com/yungibly/sshound"
 
 [dependencies]
 anyhow = "1"

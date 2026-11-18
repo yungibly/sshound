@@ -13,13 +13,23 @@ It is one binary with two roles:
 | Remote machine | `sshound FILE...` | Decodes, draws the player, sends audio |
 | Your machine | `sshound listen` | Receives audio and plays it |
 
-## Setup
+## Install
 
-Build it on both machines (`cargo install --path .` puts it in `~/.cargo/bin`).
+On both machines:
+
+```sh
+brew install yungibly/tap/sshound
+```
+
+Without Homebrew, take the archive for your platform from the
+[releases](https://github.com/yungibly/sshound/releases) and copy `bin/sshound`
+onto your `PATH`, or build it with `cargo install --path .`.
 
 - **Remote machine:** needs `ffmpeg` on the `PATH` for decoding.
-- **Your machine (macOS):** needs nothing else; it plays through the default
+- **Your machine:** needs nothing else on macOS; it plays through the default
   output device. On Linux it plays through `pw-cat` or `aplay`.
+
+## Use
 
 On your machine, leave this running:
 
@@ -46,6 +56,7 @@ sshound album/*        # several files; things that are not audio are skipped
 | `q` | Quit |
 
 Clicking or dragging on the waveform seeks; the buttons are clickable too.
+`sshound --help` lists the keys.
 
 ## How the two ends find each other
 
@@ -75,3 +86,23 @@ whether to allow incoming connections the first time; say yes.
   tenth of a second per minute of audio.
 - There is no authentication beyond the network: anyone who can reach the
   listener's port (by default, devices on your tailnet) can play sound through it.
+
+## Development
+
+```sh
+cargo test
+cargo build && python3 tools/tui-test/shots.py target/shots
+```
+
+The tests include a player and a listener talking over a loopback connection.
+The second command is for looking at the interface: it runs the player in a
+headless terminal ([tui-test](https://github.com/microsoft/tui-test), fetched
+into `target/` and checksum-verified), puts it through its states, and writes a
+PNG of each. It needs `ffmpeg`.
+
+To release, set the version in `Cargo.toml`, add a `## vX.Y.Z` section to
+`CHANGELOG.md`, and push the tag `vX.Y.Z`. The release workflow builds and
+tests on macOS and Linux, publishes the archives, checks that Homebrew can
+install them, and updates the formula in
+[yungibly/homebrew-tap](https://github.com/yungibly/homebrew-tap) using the
+`BREW_TAP_TOKEN` secret.
