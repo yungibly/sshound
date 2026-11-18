@@ -11,8 +11,6 @@ use anyhow::{Context, Result, bail};
 use crate::proto::{FRAME, RATE};
 
 pub struct Track {
-    /// e.g. "flac · 44.1 kHz · stereo"; empty if unknown.
-    pub info: String,
     /// The whole file as 48 kHz stereo s16le.
     pub pcm: Arc<Vec<u8>>,
     pub frames: u64,
@@ -50,7 +48,6 @@ pub fn decode(path: &Path) -> Result<Track> {
     }
 
     Ok(Track {
-        info: probe(path).unwrap_or_default(),
         frames: (pcm.len() / FRAME) as u64,
         envelope: Envelope::of(&pcm),
         pcm: Arc::new(pcm),
@@ -62,47 +59,6 @@ fn url(path: &Path) -> OsString {
     let mut url = OsString::from("file:");
     url.push(path);
     url
-}
-
-fn probe(path: &Path) -> Option<String> {
-    let out = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
-        .args([
-            "stream=codec_name,sample_rate,channels",
-            "-of",
-            "default=nw=1",
-        ])
-        .arg(url(path))
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let field = |key: &str| {
-        text.lines()
-            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
-            .map(str::trim)
-    };
-
-    let mut parts = Vec::new();
-    if let Some(codec) = field("codec_name") {
-        // pcm_s16le, pcm_f32be, … are all just "pcm" to a listener.
-        parts.push(codec.split('_').next().unwrap_or(codec).to_string());
-    }
-    if let Some(hz) = field("sample_rate").and_then(|s| s.parse::<u32>().ok()) {
-        let khz = hz as f32 / 1000.0;
-        parts.push(if hz % 1000 == 0 {
-            format!("{khz:.0} kHz")
-        } else {
-            format!("{khz:.1} kHz")
-        });
-    }
-    match field("channels").and_then(|s| s.parse::<u32>().ok()) {
-        Some(1) => parts.push("mono".into()),
-        Some(2) => parts.push("stereo".into()),
-        Some(n) => parts.push(format!("{n} ch")),
-        None => {}
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// Loudness over time at a fixed resolution, from which bars of any count are cut.

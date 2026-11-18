@@ -1,10 +1,11 @@
-//! The terminal interface: a bar waveform with transport controls under it.
+//! The terminal interface: a bar waveform with transport controls under it,
+//! and as little else as possible.
 
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ratatui::buffer::Buffer;
@@ -13,8 +14,8 @@ use ratatui::crossterm::event::{
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use ratatui::layout::{Alignment, Position, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::layout::{Alignment, Position, Rect, Size};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
@@ -31,12 +32,13 @@ const HEAD: Color = Color::Reset;
 const AHEAD: Color = Color::Indexed(240);
 const DIM: Color = Color::Indexed(245);
 const FAINT: Color = Color::Indexed(240);
-const GOOD: Color = Color::Indexed(114);
 const WARN: Color = Color::Indexed(179);
 const BAD: Color = Color::Indexed(203);
 
 const MAX_WIDTH: u16 = 160;
 const MAX_WAVE_ROWS: u16 = 12;
+/// How long the volume stays on screen after a change.
+const VOLUME_SHOWN: Duration = Duration::from_millis(1500);
 
 /// One-eighth steps of a cell, filled from the bottom.
 const EIGHTHS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
@@ -53,6 +55,20 @@ enum Act {
 /// A finished decode, tagged with the load it belongs to.
 type Decoded = (u64, Result<Track>);
 
+/// What is on screen, as far as deciding whether to redraw goes.
+#[derive(PartialEq)]
+struct Picture {
+    size: Size,
+    file: usize,
+    load: u64,
+    view: std::mem::Discriminant<View>,
+    clock: String,
+    head: usize,
+    playing: bool,
+    link: Link,
+    volume: Option<u8>,
+}
+
 enum View {
     Loading,
     Ready(Track),
@@ -68,6 +84,7 @@ struct App {
     player: Player,
     /// Percent.
     volume: u8,
+    volume_changed: Option<Instant>,
     decoded: (Sender<Decoded>, Receiver<Decoded>),
     load_id: u64,
     bars: Vec<f32>,
@@ -95,6 +112,7 @@ pub fn run(files: Vec<PathBuf>, player: Player) -> Result<()> {
         view: View::Loading,
         player,
         volume: 100,
+        volume_changed: None,
         decoded: mpsc::channel(),
         load_id: 0,
         bars: Vec::new(),
@@ -113,9 +131,17 @@ pub fn run(files: Vec<PathBuf>, player: Player) -> Result<()> {
 impl App {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         self.open(0);
+        let mut shown = None;
         while !self.quit {
             self.tick();
-            terminal.draw(|frame| self.draw(frame))?;
+            // Redraw only when the picture would differ, so that a paused or
+            // slowly moving player sends nothing down the ssh connection.
+            let status = self.player.status();
+            let picture = self.picture(terminal.size()?, &status);
+            if shown.as_ref() != Some(&picture) {
+                terminal.draw(|frame| self.draw(frame, &status))?;
+                shown = Some(picture);
+            }
             if event::poll(Duration::from_millis(50))? {
                 loop {
                     match event::read()? {
@@ -189,6 +215,27 @@ impl App {
         }
     }
 
+    /// Everything the next frame depends on.
+    fn picture(&self, size: Size, status: &Status) -> Picture {
+        let total = self.frames();
+        Picture {
+            size,
+            file: self.idx,
+            load: self.load_id,
+            view: std::mem::discriminant(&self.view),
+            clock: clock(status.pos, total),
+            head: head(status, total, bar_count(wave_width(size.width))),
+            playing: status.playing,
+            link: status.link.clone(),
+            volume: self.volume_visible().then_some(self.volume),
+        }
+    }
+
+    fn volume_visible(&self) -> bool {
+        self.volume_changed
+            .is_some_and(|at| at.elapsed() < VOLUME_SHOWN)
+    }
+
     fn frames(&self) -> u64 {
         match &self.view {
             View::Ready(track) => track.frames,
@@ -230,6 +277,7 @@ impl App {
 
     fn set_volume(&mut self, percent: i16) {
         self.volume = percent.clamp(0, 100) as u8;
+        self.volume_changed = Some(Instant::now());
         // Squared, so the steps sound even.
         let gain = self.volume as f32 / 100.0;
         self.player.set_volume(gain * gain);
@@ -285,61 +333,65 @@ impl App {
         self.player.seek((fraction * self.frames() as f64) as u64);
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
+    fn draw(&mut self, frame: &mut Frame, status: &Status) {
         let area = frame.area();
         self.wave = Rect::default();
         self.buttons.clear();
-        if area.width < 28 || area.height < 5 {
+        if area.width < 28 || area.height < 4 {
             frame.render_widget(Line::styled("window too small", DIM), area);
             return;
         }
-        let status = self.player.status();
 
-        // title / waveform / transport / footer, with blank rows between and
-        // around them when there is height to spare.
-        let gap = (area.height >= 12) as u16;
-        let width = (area.width - 4).min(MAX_WIDTH);
+        // title / waveform / transport, with blank rows between and around
+        // them when there is height to spare.
+        let gap = (area.height >= 10) as u16;
+        let width = wave_width(area.width);
         let x = area.x + (area.width - width) / 2;
-        let chrome = 3 + 3 * gap;
+        let chrome = 2 + 2 * gap;
         let wave_rows = (area.height - chrome - 2 * gap).min(MAX_WAVE_ROWS) & !1;
         let mut y = area.y + (area.height - chrome - wave_rows) / 2;
         let row = |y: u16, height: u16| Rect::new(x, y, width, height);
 
-        self.draw_title(frame, row(y, 1));
+        self.draw_title(frame, row(y, 1), status);
         y += 1 + gap;
-        self.draw_wave(frame, row(y, wave_rows), &status);
+        self.draw_wave(frame, row(y, wave_rows), status);
         y += wave_rows + gap;
-        self.draw_transport(frame, row(y, 1), &status);
-        y += 1 + gap;
-        self.draw_footer(frame, row(y, 1), &status);
+        self.draw_transport(frame, row(y, 1), status);
     }
 
-    fn draw_title(&self, frame: &mut Frame, area: Rect) {
+    fn draw_title(&self, frame: &mut Frame, area: Rect, status: &Status) {
         let path = &self.files[self.idx];
         let name = path
             .file_name()
             .unwrap_or(path.as_os_str())
             .to_string_lossy();
 
-        // Details go on the right, shedding the format first if space is tight.
-        let mut details = Vec::new();
-        if self.files.len() > 1 {
-            details.push(format!("{}/{}", self.idx + 1, self.files.len()));
-        }
-        if let View::Ready(track) = &self.view
-            && !track.info.is_empty()
-        {
-            details.push(track.info.clone());
-        }
-        let mut name_width = area.width;
-        while !details.is_empty() {
-            let line = Line::styled(details.join("   "), DIM);
-            if line.width() as u16 + 12 <= area.width {
-                name_width -= line.width() as u16 + 2;
-                flush_right(frame, area, line);
-                break;
+        // The right-hand side is for what needs saying: that nothing can be
+        // heard yet, or else where we are in a list of files. Each has shorter
+        // forms for narrow windows.
+        let waiting =
+            |text: String| Line::from(vec![Span::styled("○ ", WARN), Span::styled(text, DIM)]);
+        let asides = match &status.link {
+            Link::Waiting(addr) => vec![
+                waiting(format!("waiting for `sshound listen` on {addr}")),
+                waiting("no listener".into()),
+                Line::styled("○", WARN),
+            ],
+            Link::Connected(_) if self.files.len() > 1 => {
+                vec![Line::styled(
+                    format!("{}/{}", self.idx + 1, self.files.len()),
+                    DIM,
+                )]
             }
-            details.pop();
+            Link::Connected(_) => vec![],
+        };
+        let mut name_width = area.width;
+        if let Some(aside) = asides
+            .into_iter()
+            .find(|aside| aside.width() as u16 + 12 <= area.width)
+        {
+            name_width -= aside.width() as u16 + 2;
+            flush_right(frame, area, aside);
         }
         frame.render_widget(
             Line::from(name).bold(),
@@ -356,16 +408,11 @@ impl App {
             View::Loading => return centred(frame, area, "decoding…", DIM),
             View::Failed(why) => return centred(frame, area, why, BAD),
         };
-        // One column of bar, one of space.
-        let count = (area.width as usize).div_ceil(2);
+        let count = bar_count(area.width);
         if self.bars.len() != count {
             self.bars = track.envelope.bars(count);
         }
-        let head = if status.ended {
-            count
-        } else {
-            (status.pos as u128 * count as u128 / track.frames.max(1) as u128) as usize
-        };
+        let head = head(status, track.frames, count);
         bars(frame.buffer_mut(), area, &self.bars, head);
         self.wave = area;
     }
@@ -376,29 +423,25 @@ impl App {
         let roomy = area.width >= 60;
 
         let mut time = vec![Span::raw(clock(pos, total))];
-        if area.width >= 48 {
+        if area.width >= 40 {
             time.push(Span::styled(format!(" / {}", clock(total, total)), DIM));
         }
         let time = Line::from(time);
         let after_time = time.width() as u16 + 2;
         frame.render_widget(time, area);
 
+        // Centred, unless that would run into the time.
         let toggle = if status.playing && total > 0 {
             "▌▌"
         } else {
             "▶"
         };
-        let mut buttons = vec![
+        let buttons = [
             (Act::Back, "◀◀"),
             (Act::Toggle, toggle),
             (Act::Forward, "▶▶"),
         ];
         let button_width = if roomy { 6 } else { 4 };
-        if self.files.len() > 1 && after_time + 5 * button_width <= area.width {
-            buttons.insert(0, (Act::Prev, "▕◀"));
-            buttons.push((Act::Next, "▶▏"));
-        }
-        // Centred, unless that would run into the time.
         let span = button_width * buttons.len() as u16;
         let offset = (area.width.saturating_sub(span) / 2).max(after_time);
         let mut x = area.x + offset;
@@ -417,46 +460,37 @@ impl App {
             x += button_width;
         }
 
-        let lit = (self.volume as usize + 5) / 10;
-        let volume = Line::from(vec![
-            Span::styled("vol ", DIM),
-            Span::raw("━".repeat(lit)),
-            Span::styled("─".repeat(10 - lit), FAINT),
-        ]);
-        if roomy && offset + span + volume.width() as u16 <= area.width {
-            flush_right(frame, area, volume);
+        // The volume only shows while it is being changed.
+        if self.volume_visible() {
+            let steps = if roomy { 20 } else { 10 };
+            let lit = self.volume as usize * steps / 100;
+            let volume = Line::from(vec![
+                Span::raw("━".repeat(lit)),
+                Span::styled("─".repeat(steps - lit), FAINT),
+            ]);
+            if offset + span + volume.width() as u16 <= area.width {
+                flush_right(frame, area, volume);
+            }
         }
     }
+}
 
-    fn draw_footer(&self, frame: &mut Frame, area: Rect, status: &Status) {
-        let link = match &status.link {
-            Link::Connected(name) => Line::from(vec![
-                Span::styled("● ", GOOD),
-                Span::styled(name.as_str(), DIM),
-            ]),
-            Link::Waiting(addr) => Line::from(vec![
-                Span::styled("○ ", WARN),
-                Span::styled(format!("waiting for `sshound listen` on {addr}"), DIM),
-            ]),
-        };
-        let room = (area.width as usize).saturating_sub(link.width() + 3);
-        frame.render_widget(link, area);
+/// The width the player occupies in a terminal `columns` wide.
+fn wave_width(columns: u16) -> u16 {
+    columns.saturating_sub(4).min(MAX_WIDTH)
+}
 
-        let files = if self.files.len() > 1 {
-            " · n/p file"
-        } else {
-            ""
-        };
-        let keys = [
-            format!("space play/pause · ←/→ seek · ↑/↓ volume{files} · q quit"),
-            format!(
-                "space · ←/→ · ↑/↓{} · q",
-                if files.is_empty() { "" } else { " · n/p" }
-            ),
-        ];
-        if let Some(keys) = keys.iter().find(|k| Line::raw(k.as_str()).width() <= room) {
-            flush_right(frame, area, Line::styled(keys.as_str(), FAINT));
-        }
+/// One column of bar, one of space.
+fn bar_count(width: u16) -> usize {
+    (width as usize).div_ceil(2)
+}
+
+/// Index of the bar under the playhead; `count` once the track has ended.
+fn head(status: &Status, frames: u64, count: usize) -> usize {
+    if status.ended {
+        count
+    } else {
+        (status.pos as u128 * count as u128 / frames.max(1) as u128) as usize
     }
 }
 
@@ -488,9 +522,15 @@ fn centred(frame: &mut Frame, area: Rect, text: &str, color: Color) {
     frame.render_widget(text, area);
 }
 
-/// Draw `heights` (0..=1) as bars mirrored about the middle of `area`, with
-/// eighth-of-a-cell resolution. Bars before `head` are played, the one at
-/// `head` is the playhead.
+/// Draw `heights` (0..=1) as bars mirrored about the middle of `area`. Bars
+/// before `head` are played, the one at `head` is the playhead.
+///
+/// The upper half has eighth-of-a-cell resolution. The lower half mirrors it as
+/// closely as the glyphs that exist allow: there are blocks that fill a cell
+/// from the bottom in eighths, but from the top only an eighth, a half, or all
+/// of it. (Inverting the colours of the bottom-up glyphs would give exact
+/// mirroring, but leaves slivers wherever a terminal draws those glyphs
+/// shorter than its line height.)
 fn bars(buf: &mut Buffer, area: Rect, heights: &[f32], head: usize) {
     let half = (area.height / 2) as usize;
     let levels = half * 8;
@@ -513,17 +553,16 @@ fn bars(buf: &mut Buffer, area: Rect, heights: &[f32], head: usize) {
             buf[(x, area.y + row as u16)]
                 .set_symbol(EIGHTHS[fill])
                 .set_style(style);
-            // Below it they must fill from the top down. There are no glyphs
-            // for that, so draw the complement and swap the colours.
-            let fill = level.saturating_sub(row * 8).min(8);
-            let cell = &mut buf[(x, area.y + (half + row) as u16)];
-            match fill {
-                0 => cell.set_symbol(" "),
-                8 => cell.set_symbol("█").set_style(style),
-                n => cell
-                    .set_symbol(EIGHTHS[8 - n])
-                    .set_style(style.add_modifier(Modifier::REVERSED)),
+            // Below it: cells fill from the top down, to the nearest glyph.
+            let symbol = match level.saturating_sub(row * 8).min(8) {
+                0 => " ",
+                1..=2 => "▔",
+                3..=5 => "▀",
+                _ => "█",
             };
+            buf[(x, area.y + (half + row) as u16)]
+                .set_symbol(symbol)
+                .set_style(style);
         }
     }
 }
@@ -567,18 +606,22 @@ mod tests {
         let mut buf = Buffer::empty(area);
         // 16 levels per half: silent, 4/16, 12/16, full.
         bars(&mut buf, area, &[0.0, 0.25, 0.75, 1.0], 2);
-        assert_eq!(rows(&buf), ["    ▄ █", "▁ ▄ █ █", "▇ ▄ █ █", "    ▄ █"]);
-
-        // The lower half is drawn inverted, except where a cell is full or empty.
-        let reversed = |x, y| buf[(x, y)].modifier.contains(Modifier::REVERSED);
-        assert!(reversed(0, 2) && reversed(2, 2) && reversed(4, 3));
-        assert!(!reversed(4, 2) && !reversed(6, 3) && !reversed(0, 3) && !reversed(2, 1));
+        assert_eq!(rows(&buf), ["    ▄ █", "▁ ▄ █ █", "▔ ▀ █ █", "    ▀ █"]);
 
         // Played, playhead, not yet played.
         assert_eq!(buf[(0, 1)].fg, PLAYED);
         assert_eq!(buf[(2, 1)].fg, PLAYED);
         assert_eq!(buf[(4, 1)].fg, HEAD);
         assert_eq!(buf[(6, 1)].fg, AHEAD);
+    }
+
+    #[test]
+    fn lower_half_rounds_to_the_glyphs_that_exist() {
+        let area = Rect::new(0, 0, 9, 2);
+        let mut buf = Buffer::empty(area);
+        // Eighths of the single row on each side: 2, 3, 5, 6, 7.
+        bars(&mut buf, area, &[0.25, 0.375, 0.625, 0.75, 0.875], 0);
+        assert_eq!(rows(&buf), ["▂ ▃ ▅ ▆ ▇", "▔ ▀ ▀ █ █"]);
     }
 
     #[test]
