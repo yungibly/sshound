@@ -175,7 +175,9 @@ impl Shared {
     /// Sleep until something changes, `timeout` passes, or it is time to quit.
     fn wait(&self, seen: u64, timeout: Duration) {
         let guard = self.lock();
-        let _ = self.wake.wait_timeout_while(guard, timeout, |s| s.seq == seen && !s.quit);
+        let _ = self
+            .wake
+            .wait_timeout_while(guard, timeout, |s| s.seq == seen && !s.quit);
     }
 }
 
@@ -220,9 +222,13 @@ fn run(shared: &Shared, targets: &[String]) {
 
 fn connect(targets: &[String], me: &str) -> Option<(TcpStream, String)> {
     for target in targets {
-        let Ok(addrs) = target.to_socket_addrs() else { continue };
+        let Ok(addrs) = target.to_socket_addrs() else {
+            continue;
+        };
         for addr in addrs {
-            let Ok(mut stream) = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) else { continue };
+            let Ok(mut stream) = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) else {
+                continue;
+            };
             let hello = (|| {
                 stream.set_nodelay(true)?;
                 stream.set_read_timeout(Some(SILENCE_TIMEOUT))?;
@@ -331,7 +337,11 @@ mod tests {
 
     fn tone(seconds: f32) -> Arc<Vec<u8>> {
         let frames = (seconds * RATE as f32) as usize;
-        Arc::new((0..frames * 2).flat_map(|i| ((i % 200) as i16 * 50).to_le_bytes()).collect())
+        Arc::new(
+            (0..frames * 2)
+                .flat_map(|i| ((i % 200) as i16 * 50).to_le_bytes())
+                .collect(),
+        )
     }
 
     fn wait_for(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
@@ -360,11 +370,17 @@ mod tests {
         let mid = player.status();
         assert!(mid.playing && !mid.ended);
         let secs = mid.pos as f64 / RATE as f64;
-        assert!((0.3..0.6).contains(&secs), "half a second in, playhead at {secs:.2}s");
+        assert!(
+            (0.3..0.6).contains(&secs),
+            "half a second in, playhead at {secs:.2}s"
+        );
 
         wait_for("the end", Duration::from_secs(5), || player.status().ended);
         let took = start.elapsed().as_secs_f64();
-        assert!((0.9..1.4).contains(&took), "a one-second track took {took:.2}s");
+        assert!(
+            (0.9..1.4).contains(&took),
+            "a one-second track took {took:.2}s"
+        );
         assert_eq!(player.status().pos, RATE as u64);
     }
 
@@ -388,7 +404,10 @@ mod tests {
         player.set_playing(true);
         thread::sleep(Duration::from_millis(400));
         let secs = player.status().pos as f64 / RATE as f64;
-        assert!((5.2..5.5).contains(&secs), "resumed from 5s, now at {secs:.2}s");
+        assert!(
+            (5.2..5.5).contains(&secs),
+            "resumed from 5s, now at {secs:.2}s"
+        );
 
         // Seeking past the end clamps to it.
         player.seek(u64::MAX);

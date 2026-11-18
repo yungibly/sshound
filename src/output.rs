@@ -31,7 +31,10 @@ impl Output {
         #[cfg(target_os = "macos")]
         return Ok(Output(Inner::Device(mac::Device::open(source)?)));
         #[cfg(not(target_os = "macos"))]
-        return Ok(Output(Inner::Pump(Pump::start(source, Some(spawn_player()?)))));
+        return Ok(Output(Inner::Pump(Pump::start(
+            source,
+            Some(spawn_player()?),
+        ))));
     }
 
     /// Start or stop pulling audio. A stopped output lets the device (and the
@@ -75,7 +78,11 @@ impl Pump {
             const TICK: Duration = Duration::from_millis(10);
             let frames = RATE as usize / 100;
             // A rough figure for what sits between our pipe and the speakers.
-            let latency = if pipe.is_some() { RATE as u64 * 60 / 1000 } else { 0 };
+            let latency = if pipe.is_some() {
+                RATE as u64 * 60 / 1000
+            } else {
+                0
+            };
             let mut samples = vec![0f32; frames * 2];
             let mut bytes = Vec::with_capacity(frames * 4);
             let mut due = Instant::now();
@@ -93,7 +100,9 @@ impl Pump {
                 if let Some(pipe) = &mut pipe {
                     bytes.clear();
                     for s in &samples {
-                        bytes.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+                        bytes.extend_from_slice(
+                            &((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes(),
+                        );
                     }
                     if pipe.write_all(&bytes).is_err() {
                         failed2.store(true, Ordering::Relaxed);
@@ -110,7 +119,13 @@ impl Pump {
             }
         });
 
-        Pump { run, stop, failed, thread: Some(thread), child }
+        Pump {
+            run,
+            stop,
+            failed,
+            thread: Some(thread),
+            child,
+        }
     }
 }
 
@@ -138,9 +153,26 @@ fn spawn_player() -> Result<Child> {
     let players: [(&str, Vec<&str>); 2] = [
         (
             "pw-cat",
-            vec!["--playback", "--raw", "--format", "s16", "--rate", &rate, "--channels", "2", "--latency", "30ms", "-"],
+            vec![
+                "--playback",
+                "--raw",
+                "--format",
+                "s16",
+                "--rate",
+                &rate,
+                "--channels",
+                "2",
+                "--latency",
+                "30ms",
+                "-",
+            ],
         ),
-        ("aplay", vec!["-q", "-t", "raw", "-f", "S16_LE", "-r", &rate, "-c", "2", "-B", "60000", "-"]),
+        (
+            "aplay",
+            vec![
+                "-q", "-t", "raw", "-f", "S16_LE", "-r", &rate, "-c", "2", "-B", "60000", "-",
+            ],
+        ),
     ];
     for (program, args) in &players {
         let child = Command::new(program)
@@ -204,14 +236,22 @@ mod mac {
                 },
                 None,
             )?;
-            Ok(Device { stream, failed, running: false })
+            Ok(Device {
+                stream,
+                failed,
+                running: false,
+            })
         }
 
         pub fn set_running(&mut self, on: bool) {
             if on == self.running {
                 return;
             }
-            let result = if on { self.stream.play() } else { self.stream.pause() };
+            let result = if on {
+                self.stream.play()
+            } else {
+                self.stream.pause()
+            };
             match result {
                 Ok(()) => self.running = on,
                 Err(_) => self.failed.store(true, Ordering::Relaxed),

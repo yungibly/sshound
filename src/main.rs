@@ -81,7 +81,9 @@ fn parse(args: Vec<OsString>, flags: &[&str], options: &[&str]) -> Result<Parsed
             if flags.contains(&name.as_str()) && inline.is_none() {
                 named.push((name, String::new()));
             } else if options.contains(&name.as_str()) {
-                let value = match inline.or_else(|| args.next().map(|v| v.to_string_lossy().into_owned())) {
+                let value = match inline
+                    .or_else(|| args.next().map(|v| v.to_string_lossy().into_owned()))
+                {
                     Some(value) => value,
                     None => bail!("{name} needs a value"),
                 };
@@ -101,12 +103,24 @@ fn listen(args: Vec<OsString>) -> Result<()> {
     if let Some(extra) = positional.first() {
         bail!("unexpected argument {extra:?} (see --help)");
     }
-    let mut opts = listen::Opts { port: proto::PORT, bind: Vec::new(), null: false };
+    let mut opts = listen::Opts {
+        port: proto::PORT,
+        bind: Vec::new(),
+        null: false,
+    };
     for (name, value) in named {
         match name.as_str() {
             "--null" => opts.null = true,
-            "--port" => opts.port = value.parse().with_context(|| format!("bad port {value:?}"))?,
-            _ => opts.bind.push(value.parse().with_context(|| format!("bad address {value:?}"))?),
+            "--port" => {
+                opts.port = value
+                    .parse()
+                    .with_context(|| format!("bad port {value:?}"))?
+            }
+            _ => opts.bind.push(
+                value
+                    .parse()
+                    .with_context(|| format!("bad address {value:?}"))?,
+            ),
         }
     }
     listen::run(opts)
@@ -157,7 +171,9 @@ fn play(args: Vec<OsString>) -> Result<()> {
 
 /// The address of the machine at the other end of this ssh session.
 fn ssh_client() -> Option<IpAddr> {
-    let conn = std::env::var("SSH_CONNECTION").or_else(|_| std::env::var("SSH_CLIENT")).ok()?;
+    let conn = std::env::var("SSH_CONNECTION")
+        .or_else(|_| std::env::var("SSH_CLIENT"))
+        .ok()?;
     let ip = conn.split_whitespace().next()?;
     // Link-local IPv6 addresses carry a %scope that IpAddr cannot parse.
     ip.split('%').next()?.parse().ok()
@@ -166,7 +182,10 @@ fn ssh_client() -> Option<IpAddr> {
 fn with_port(to: &str) -> String {
     if let Ok(ip) = to.parse::<IpAddr>() {
         SocketAddr::new(ip, proto::PORT).to_string()
-    } else if to.rsplit_once(':').is_some_and(|(_, port)| port.parse::<u16>().is_ok()) {
+    } else if to
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
+    {
         to.to_string()
     } else {
         format!("{to}:{}", proto::PORT)
@@ -200,11 +219,13 @@ mod tests {
     #[test]
     fn arguments_split_into_options_and_files() {
         let args = |list: &[&str]| list.iter().map(OsString::from).collect::<Vec<_>>();
-        let (named, files) = parse(args(&["a.wav", "--to", "mac", "b.wav"]), &[], &["--to"]).unwrap();
+        let (named, files) =
+            parse(args(&["a.wav", "--to", "mac", "b.wav"]), &[], &["--to"]).unwrap();
         assert_eq!(named, [("--to".to_string(), "mac".to_string())]);
         assert_eq!(files, args(&["a.wav", "b.wav"]));
 
-        let (named, files) = parse(args(&["--to=mac:1", "--", "--odd.wav"]), &[], &["--to"]).unwrap();
+        let (named, files) =
+            parse(args(&["--to=mac:1", "--", "--odd.wav"]), &[], &["--to"]).unwrap();
         assert_eq!(named, [("--to".to_string(), "mac:1".to_string())]);
         assert_eq!(files, args(&["--odd.wav"]));
 

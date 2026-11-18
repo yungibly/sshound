@@ -58,7 +58,12 @@ impl Source {
     /// Append s16le stereo PCM.
     pub fn push(&mut self, pcm: &[u8]) {
         let frames = pcm.as_chunks::<4>().0.iter();
-        self.queue.extend(frames.map(|f| [i16::from_le_bytes([f[0], f[1]]), i16::from_le_bytes([f[2], f[3]])]));
+        self.queue.extend(frames.map(|f| {
+            [
+                i16::from_le_bytes([f[0], f[1]]),
+                i16::from_le_bytes([f[2], f[3]]),
+            ]
+        }));
     }
 
     pub fn queued(&self) -> usize {
@@ -77,7 +82,11 @@ impl Source {
     }
 
     pub fn set_volume(&mut self, volume: f32) {
-        self.volume = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 0.0 };
+        self.volume = if volume.is_finite() {
+            volume.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
     }
 
     /// False once paused and fully faded out: the device can be stopped.
@@ -94,7 +103,11 @@ impl Source {
             .last()
             .filter(|m| m.epoch == self.epoch)
             .map_or(0, |m| m.consumed);
-        Report { epoch: self.epoch, consumed: self.consumed, played }
+        Report {
+            epoch: self.epoch,
+            consumed: self.consumed,
+            played,
+        }
     }
 
     /// Fill `out` (interleaved, `channels` wide, at `rate` Hz) with the next audio.
@@ -118,7 +131,11 @@ impl Source {
             } else {
                 (self.gain - ramp).max(target)
             };
-            let [l, r] = if rate == RATE { self.next_direct() } else { self.next_resampled(step) };
+            let [l, r] = if rate == RATE {
+                self.next_direct()
+            } else {
+                self.next_resampled(step)
+            };
             let (l, r) = (l * self.gain, r * self.gain);
             if channels == 1 {
                 frame[0] = (l + r) * 0.5;
@@ -224,7 +241,10 @@ mod tests {
         assert!(s.wants_output(), "still fading");
         s.fill(&mut out, 2, RATE, 0);
         let after_fade = s.report().consumed;
-        assert!(after_fade > 1000 && after_fade < 1000 + 400, "consumed {after_fade}");
+        assert!(
+            after_fade > 1000 && after_fade < 1000 + 400,
+            "consumed {after_fade}"
+        );
         assert!(!s.wants_output());
         s.fill(&mut out, 2, RATE, 0);
         assert_eq!(s.report().consumed, after_fade);
@@ -239,7 +259,14 @@ mod tests {
         // 960 frames of latency = two buffers.
         s.fill(&mut out, 2, RATE, 960);
         s.fill(&mut out, 2, RATE, 960);
-        assert_eq!(s.report(), Report { epoch: 0, consumed: 960, played: 0 });
+        assert_eq!(
+            s.report(),
+            Report {
+                epoch: 0,
+                consumed: 960,
+                played: 0
+            }
+        );
         s.fill(&mut out, 2, RATE, 960);
         assert_eq!(s.report().played, 480);
         s.fill(&mut out, 2, RATE, 960);
@@ -255,7 +282,14 @@ mod tests {
         assert_eq!(s.report().played, 0);
         s.fill(&mut out, 2, RATE, 960);
         s.fill(&mut out, 2, RATE, 960);
-        assert_eq!(s.report(), Report { epoch: 0, consumed: 480, played: 480 });
+        assert_eq!(
+            s.report(),
+            Report {
+                epoch: 0,
+                consumed: 480,
+                played: 480
+            }
+        );
     }
 
     #[test]
@@ -268,11 +302,25 @@ mod tests {
         assert_eq!(s.report().played, 480);
         s.flush(5);
         assert_eq!(s.queued(), 0);
-        assert_eq!(s.report(), Report { epoch: 5, consumed: 0, played: 0 });
+        assert_eq!(
+            s.report(),
+            Report {
+                epoch: 5,
+                consumed: 0,
+                played: 0
+            }
+        );
         s.push(&pcm(2000, 1000));
         s.fill(&mut out, 2, RATE, 480);
         // Audio from the old epoch is still in the device buffer.
-        assert_eq!(s.report(), Report { epoch: 5, consumed: 480, played: 0 });
+        assert_eq!(
+            s.report(),
+            Report {
+                epoch: 5,
+                consumed: 480,
+                played: 0
+            }
+        );
         s.fill(&mut out, 2, RATE, 480);
         assert_eq!(s.report().played, 480);
     }
@@ -283,7 +331,8 @@ mod tests {
         // One second of a 1 kHz sine at half scale.
         let sine: Vec<u8> = (0..48_000)
             .flat_map(|i| {
-                let v = ((i as f32 * 1000.0 * std::f32::consts::TAU / 48_000.0).sin() * 16384.0) as i16;
+                let v =
+                    ((i as f32 * 1000.0 * std::f32::consts::TAU / 48_000.0).sin() * 16384.0) as i16;
                 [v.to_le_bytes(), v.to_le_bytes()].concat()
             })
             .collect();
@@ -298,9 +347,15 @@ mod tests {
         let peak = tail.iter().fold(0f32, |m, x| m.max(x.abs()));
         assert!((peak - 0.5).abs() < 0.01, "peak {peak}");
         let left: Vec<f32> = tail.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
-        let crossings = left.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+        let crossings = left
+            .windows(2)
+            .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+            .count();
         let expected = left.len() as f32 / 44_100.0 * 1000.0;
-        assert!((crossings as f32 - expected).abs() <= 1.0, "{crossings} vs {expected}");
+        assert!(
+            (crossings as f32 - expected).abs() <= 1.0,
+            "{crossings} vs {expected}"
+        );
     }
 
     #[test]

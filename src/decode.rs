@@ -40,7 +40,11 @@ pub fn decode(path: &Path) -> Result<Track> {
     if pcm.is_empty() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         // ffmpeg's last line is the summary; drop the "file:…: " it prefixes.
-        let reason = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no audio found");
+        let reason = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no audio found");
         let reason = reason.rsplit(": ").next().unwrap_or(reason);
         bail!("{}", reason.trim());
     }
@@ -63,14 +67,20 @@ fn url(path: &Path) -> OsString {
 fn probe(path: &Path) -> Option<String> {
     let out = Command::new("ffprobe")
         .args(["-v", "error", "-select_streams", "a:0", "-show_entries"])
-        .args(["stream=codec_name,sample_rate,channels", "-of", "default=nw=1"])
+        .args([
+            "stream=codec_name,sample_rate,channels",
+            "-of",
+            "default=nw=1",
+        ])
         .arg(url(path))
         .stdin(Stdio::null())
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     let field = |key: &str| {
-        text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix('=')).map(str::trim)
+        text.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+            .map(str::trim)
     };
 
     let mut parts = Vec::new();
@@ -80,7 +90,11 @@ fn probe(path: &Path) -> Option<String> {
     }
     if let Some(hz) = field("sample_rate").and_then(|s| s.parse::<u32>().ok()) {
         let khz = hz as f32 / 1000.0;
-        parts.push(if hz % 1000 == 0 { format!("{khz:.0} kHz") } else { format!("{khz:.1} kHz") });
+        parts.push(if hz % 1000 == 0 {
+            format!("{khz:.0} kHz")
+        } else {
+            format!("{khz:.1} kHz")
+        });
     }
     match field("channels").and_then(|s| s.parse::<u32>().ok()) {
         Some(1) => parts.push("mono".into()),
@@ -137,7 +151,11 @@ impl Envelope {
         let loudest = bars.iter().copied().fold(0.0, f32::max);
         for bar in &mut bars {
             // A gentle curve keeps quiet passages visible next to loud ones.
-            *bar = if loudest > 1e-4 { (*bar / loudest).powf(0.7) } else { 0.0 };
+            *bar = if loudest > 1e-4 {
+                (*bar / loudest).powf(0.7)
+            } else {
+                0.0
+            };
         }
         bars
     }

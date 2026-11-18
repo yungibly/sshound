@@ -9,8 +9,8 @@ use std::time::Duration;
 use anyhow::Result;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseButton, MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Position, Rect};
@@ -138,18 +138,26 @@ impl App {
         self.bars.clear();
         self.player.unload();
         self.load_id += 1;
-        let (id, path, done) = (self.load_id, self.files[idx].clone(), self.decoded.0.clone());
+        let (id, path, done) = (
+            self.load_id,
+            self.files[idx].clone(),
+            self.decoded.0.clone(),
+        );
         thread::spawn(move || {
             let _ = done.send((id, decode::decode(&path)));
         });
     }
 
     fn neighbour(&self, step: isize) -> Option<usize> {
-        self.idx.checked_add_signed(step).filter(|&i| i < self.files.len())
+        self.idx
+            .checked_add_signed(step)
+            .filter(|&i| i < self.files.len())
     }
 
     fn step_to(&mut self, step: isize) -> bool {
-        let Some(idx) = self.neighbour(step) else { return false };
+        let Some(idx) = self.neighbour(step) else {
+            return false;
+        };
         self.direction = step;
         self.open(idx);
         true
@@ -192,7 +200,11 @@ impl App {
         let total = self.frames();
         let status = self.player.status();
         // Short sounds get proportionally shorter skips.
-        let skip = if total < 30 * RATE as u64 { (total / 10).max(1) } else { 5 * RATE as u64 };
+        let skip = if total < 30 * RATE as u64 {
+            (total / 10).max(1)
+        } else {
+            5 * RATE as u64
+        };
         match act {
             Act::Toggle if total > 0 => {
                 if status.ended {
@@ -250,11 +262,15 @@ impl App {
                 if self.wave.contains(at) {
                     self.scrubbing = true;
                     self.seek_to_column(mouse.column);
-                } else if let Some(&(_, act)) = self.buttons.iter().find(|(rect, _)| rect.contains(at)) {
+                } else if let Some(&(_, act)) =
+                    self.buttons.iter().find(|(rect, _)| rect.contains(at))
+                {
                     self.act(act);
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) if self.scrubbing => self.seek_to_column(mouse.column),
+            MouseEventKind::Drag(MouseButton::Left) if self.scrubbing => {
+                self.seek_to_column(mouse.column)
+            }
             MouseEventKind::Up(_) => self.scrubbing = false,
             _ => {}
         }
@@ -300,7 +316,10 @@ impl App {
 
     fn draw_title(&self, frame: &mut Frame, area: Rect) {
         let path = &self.files[self.idx];
-        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
 
         // Details go on the right, shedding the format first if space is tight.
         let mut details = Vec::new();
@@ -322,7 +341,13 @@ impl App {
             }
             details.pop();
         }
-        frame.render_widget(Line::from(name).bold(), Rect { width: name_width, ..area });
+        frame.render_widget(
+            Line::from(name).bold(),
+            Rect {
+                width: name_width,
+                ..area
+            },
+        );
     }
 
     fn draw_wave(&mut self, frame: &mut Frame, area: Rect, status: &Status) {
@@ -358,8 +383,16 @@ impl App {
         let after_time = time.width() as u16 + 2;
         frame.render_widget(time, area);
 
-        let toggle = if status.playing && total > 0 { "▌▌" } else { "▶" };
-        let mut buttons = vec![(Act::Back, "◀◀"), (Act::Toggle, toggle), (Act::Forward, "▶▶")];
+        let toggle = if status.playing && total > 0 {
+            "▌▌"
+        } else {
+            "▶"
+        };
+        let mut buttons = vec![
+            (Act::Back, "◀◀"),
+            (Act::Toggle, toggle),
+            (Act::Forward, "▶▶"),
+        ];
         let button_width = if roomy { 6 } else { 4 };
         if self.files.len() > 1 && after_time + 5 * button_width <= area.width {
             buttons.insert(0, (Act::Prev, "▕◀"));
@@ -371,8 +404,15 @@ impl App {
         let mut x = area.x + offset;
         for (act, label) in buttons {
             let rect = Rect::new(x, area.y, button_width, 1).intersection(area);
-            let style = if act == Act::Toggle { Style::new().bold() } else { Style::new().fg(DIM) };
-            frame.render_widget(Line::styled(label, style).alignment(Alignment::Center), rect);
+            let style = if act == Act::Toggle {
+                Style::new().bold()
+            } else {
+                Style::new().fg(DIM)
+            };
+            frame.render_widget(
+                Line::styled(label, style).alignment(Alignment::Center),
+                rect,
+            );
             self.buttons.push((rect, act));
             x += button_width;
         }
@@ -390,7 +430,10 @@ impl App {
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect, status: &Status) {
         let link = match &status.link {
-            Link::Connected(name) => Line::from(vec![Span::styled("● ", GOOD), Span::styled(name.as_str(), DIM)]),
+            Link::Connected(name) => Line::from(vec![
+                Span::styled("● ", GOOD),
+                Span::styled(name.as_str(), DIM),
+            ]),
             Link::Waiting(addr) => Line::from(vec![
                 Span::styled("○ ", WARN),
                 Span::styled(format!("waiting for `sshound listen` on {addr}"), DIM),
@@ -399,10 +442,17 @@ impl App {
         let room = (area.width as usize).saturating_sub(link.width() + 3);
         frame.render_widget(link, area);
 
-        let files = if self.files.len() > 1 { " · n/p file" } else { "" };
+        let files = if self.files.len() > 1 {
+            " · n/p file"
+        } else {
+            ""
+        };
         let keys = [
             format!("space play/pause · ←/→ seek · ↑/↓ volume{files} · q quit"),
-            format!("space · ←/→ · ↑/↓{} · q", if files.is_empty() { "" } else { " · n/p" }),
+            format!(
+                "space · ←/→ · ↑/↓{} · q",
+                if files.is_empty() { "" } else { " · n/p" }
+            ),
         ];
         if let Some(keys) = keys.iter().find(|k| Line::raw(k.as_str()).width() <= room) {
             flush_right(frame, area, Line::styled(keys.as_str(), FAINT));
@@ -414,13 +464,27 @@ impl App {
 /// covers (a `Line` restyles the whole of whatever area it is given).
 fn flush_right(frame: &mut Frame, area: Rect, line: Line) {
     let width = (line.width() as u16).min(area.width);
-    frame.render_widget(line, Rect { x: area.right() - width, width, ..area });
+    frame.render_widget(
+        line,
+        Rect {
+            x: area.right() - width,
+            width,
+            ..area
+        },
+    );
 }
 
 fn centred(frame: &mut Frame, area: Rect, text: &str, color: Color) {
     let rows = area.height.min(2);
-    let area = Rect { y: area.y + (area.height - rows) / 2, height: rows, ..area };
-    let text = Paragraph::new(text).style(color).alignment(Alignment::Center).wrap(Wrap { trim: true });
+    let area = Rect {
+        y: area.y + (area.height - rows) / 2,
+        height: rows,
+        ..area
+    };
+    let text = Paragraph::new(text)
+        .style(color)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
     frame.render_widget(text, area);
 }
 
@@ -446,7 +510,9 @@ fn bars(buf: &mut Buffer, area: Rect, heights: &[f32], head: usize) {
         for row in 0..half {
             // Above the middle: cells fill from the bottom up.
             let fill = level.saturating_sub((half - 1 - row) * 8).min(8);
-            buf[(x, area.y + row as u16)].set_symbol(EIGHTHS[fill]).set_style(style);
+            buf[(x, area.y + row as u16)]
+                .set_symbol(EIGHTHS[fill])
+                .set_style(style);
             // Below it they must fill from the top down. There are no glyphs
             // for that, so draw the complement and swap the colours.
             let fill = level.saturating_sub(row * 8).min(8);
@@ -454,7 +520,9 @@ fn bars(buf: &mut Buffer, area: Rect, heights: &[f32], head: usize) {
             match fill {
                 0 => cell.set_symbol(" "),
                 8 => cell.set_symbol("█").set_style(style),
-                n => cell.set_symbol(EIGHTHS[8 - n]).set_style(style.add_modifier(Modifier::REVERSED)),
+                n => cell
+                    .set_symbol(EIGHTHS[8 - n])
+                    .set_style(style.add_modifier(Modifier::REVERSED)),
             };
         }
     }
@@ -465,7 +533,12 @@ fn clock(frames: u64, total: u64) -> String {
     let rate = RATE as u64;
     let secs = frames / rate;
     if total > 0 && total < 10 * rate {
-        format!("{}:{:02}.{}", secs / 60, secs % 60, frames % rate * 10 / rate)
+        format!(
+            "{}:{:02}.{}",
+            secs / 60,
+            secs % 60,
+            frames % rate * 10 / rate
+        )
     } else if total < 3600 * rate {
         format!("{}:{:02}", secs / 60, secs % 60)
     } else {
@@ -480,7 +553,11 @@ mod tests {
     fn rows(buf: &Buffer) -> Vec<String> {
         let area = buf.area;
         (area.top()..area.bottom())
-            .map(|y| (area.left()..area.right()).map(|x| buf[(x, y)].symbol()).collect())
+            .map(|y| {
+                (area.left()..area.right())
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect()
+            })
             .collect()
     }
 

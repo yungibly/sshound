@@ -49,7 +49,8 @@ pub fn run(opts: Opts) -> Result<()> {
     };
 
     // Fail now, not on the first connection, if there is nothing to play through.
-    Output::open(Arc::new(Mutex::new(Source::new())), opts.null).context("cannot open audio output")?;
+    Output::open(Arc::new(Mutex::new(Source::new())), opts.null)
+        .context("cannot open audio output")?;
 
     let server = Server {
         name: crate::hostname(),
@@ -60,7 +61,8 @@ pub fn run(opts: Opts) -> Result<()> {
     let mut threads = Vec::new();
     for ip in addrs {
         let addr = SocketAddr::new(ip, opts.port);
-        let listener = TcpListener::bind(addr).with_context(|| format!("cannot listen on {addr}"))?;
+        let listener =
+            TcpListener::bind(addr).with_context(|| format!("cannot listen on {addr}"))?;
         eprintln!("listening on {addr}");
         let server = server.clone();
         threads.push(thread::spawn(move || accept(listener, server)));
@@ -95,7 +97,10 @@ fn accept(listener: TcpListener, server: Server) {
         let server = server.clone();
         thread::spawn(move || {
             if server.players.fetch_add(1, Ordering::SeqCst) < MAX_PLAYERS {
-                let peer = stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+                let peer = stream
+                    .peer_addr()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_default();
                 if let Err(e) = serve(stream, &server)
                     && server.log
                 {
@@ -122,7 +127,12 @@ fn serve(mut stream: TcpStream, server: &Server) -> Result<()> {
 
     let done = Arc::new(AtomicBool::new(false));
     let keeper = {
-        let (stream, source, done, null) = (stream.try_clone()?, source.clone(), done.clone(), server.null);
+        let (stream, source, done, null) = (
+            stream.try_clone()?,
+            source.clone(),
+            done.clone(),
+            server.null,
+        );
         thread::spawn(move || keep(stream, source, output, null, done))
     };
     let result = receive(&mut stream, &source);
@@ -141,7 +151,12 @@ fn receive(stream: &mut TcpStream, source: &Shared) -> Result<()> {
         let cmd = match Cmd::read(stream) {
             Ok(cmd) => cmd,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
                 anyhow::bail!("timed out")
             }
             Err(e) => return Err(e.into()),
@@ -168,7 +183,13 @@ fn receive(stream: &mut TcpStream, source: &Shared) -> Result<()> {
 /// Report the playhead back to the player and keep the output device in step
 /// with what is wanted: running while there is something to play, stopped
 /// after a moment of pause, reopened if it breaks.
-fn keep(mut stream: TcpStream, source: Shared, mut output: Output, null: bool, done: Arc<AtomicBool>) {
+fn keep(
+    mut stream: TcpStream,
+    source: Shared,
+    mut output: Output,
+    null: bool,
+    done: Arc<AtomicBool>,
+) {
     let mut last = Report::default();
     let mut last_sent: Option<Instant> = None;
     let mut idle_since: Option<Instant> = None;
