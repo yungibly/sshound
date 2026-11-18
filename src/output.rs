@@ -60,6 +60,7 @@ struct Pump {
     stop: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    child: Option<Child>,
 }
 
 impl Pump {
@@ -68,13 +69,13 @@ impl Pump {
         let stop = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let (run2, stop2, failed2) = (run.clone(), stop.clone(), failed.clone());
+        let mut pipe = child.as_mut().and_then(|c| c.stdin.take());
 
         let thread = thread::spawn(move || {
             const TICK: Duration = Duration::from_millis(10);
             let frames = RATE as usize / 100;
             // A rough figure for what sits between our pipe and the speakers.
-            let latency = if child.is_some() { RATE as u64 * 60 / 1000 } else { 0 };
-            let mut pipe = child.as_mut().and_then(|c| c.stdin.take());
+            let latency = if pipe.is_some() { RATE as u64 * 60 / 1000 } else { 0 };
             let mut samples = vec![0f32; frames * 2];
             let mut bytes = Vec::with_capacity(frames * 4);
             let mut due = Instant::now();
@@ -107,23 +108,24 @@ impl Pump {
                     due = now; // fell far behind (machine was suspended): don't burst
                 }
             }
-
-            drop(pipe);
-            if let Some(mut child) = child {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
         });
 
-        Pump { run, stop, failed, thread: Some(thread) }
+        Pump { run, stop, failed, thread: Some(thread), child }
     }
 }
 
 impl Drop for Pump {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // Killing the player first unblocks the thread if it is stuck writing to it.
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+        }
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+        if let Some(child) = &mut self.child {
+            let _ = child.wait();
         }
     }
 }

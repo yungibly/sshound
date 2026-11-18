@@ -37,7 +37,6 @@ const BAD: Color = Color::Indexed(203);
 
 const MAX_WIDTH: u16 = 160;
 const MAX_WAVE_ROWS: u16 = 12;
-const BUTTON_WIDTH: u16 = 6;
 
 /// One-eighth steps of a cell, filled from the bottom.
 const EIGHTHS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
@@ -300,6 +299,7 @@ impl App {
         let path = &self.files[self.idx];
         let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
 
+        // Details go on the right, shedding the format first if space is tight.
         let mut details = Vec::new();
         if self.files.len() > 1 {
             details.push(format!("{}/{}", self.idx + 1, self.files.len()));
@@ -309,11 +309,15 @@ impl App {
         {
             details.push(track.info.clone());
         }
-        let details = Line::styled(details.join("   "), DIM).alignment(Alignment::Right);
         let mut name_width = area.width;
-        if details.width() as u16 + 12 <= area.width {
-            name_width -= details.width() as u16 + 2;
-            frame.render_widget(details, area);
+        while !details.is_empty() {
+            let line = Line::styled(details.join("   "), DIM);
+            if line.width() as u16 + 12 <= area.width {
+                name_width -= line.width() as u16 + 2;
+                flush_right(frame, area, line);
+                break;
+            }
+            details.pop();
         }
         frame.render_widget(Line::from(name).bold(), Rect { width: name_width, ..area });
     }
@@ -341,36 +345,43 @@ impl App {
     fn draw_transport(&mut self, frame: &mut Frame, area: Rect, status: &Status) {
         let total = self.frames();
         let pos = if total > 0 { status.pos } else { 0 };
-        let time = Line::from(vec![
-            Span::raw(clock(pos, total)),
-            Span::styled(format!(" / {}", clock(total, total)), DIM),
-        ]);
-        frame.render_widget(time, area);
+        let roomy = area.width >= 60;
 
-        if area.width >= 60 {
-            let lit = (self.volume as usize + 5) / 10;
-            let volume = Line::from(vec![
-                Span::styled("vol ", DIM),
-                Span::raw("━".repeat(lit)),
-                Span::styled("━".repeat(10 - lit), FAINT),
-            ]);
-            frame.render_widget(volume.alignment(Alignment::Right), area);
+        let mut time = vec![Span::raw(clock(pos, total))];
+        if area.width >= 48 {
+            time.push(Span::styled(format!(" / {}", clock(total, total)), DIM));
         }
+        let time = Line::from(time);
+        let after_time = time.width() as u16 + 2;
+        frame.render_widget(time, area);
 
         let toggle = if status.playing && total > 0 { "▌▌" } else { "▶" };
         let mut buttons = vec![(Act::Back, "◀◀"), (Act::Toggle, toggle), (Act::Forward, "▶▶")];
-        if self.files.len() > 1 {
+        let button_width = if roomy { 6 } else { 4 };
+        if self.files.len() > 1 && after_time + 5 * button_width <= area.width {
             buttons.insert(0, (Act::Prev, "▕◀"));
             buttons.push((Act::Next, "▶▏"));
         }
-        let span = BUTTON_WIDTH * buttons.len() as u16;
-        let mut x = area.x + area.width.saturating_sub(span) / 2;
+        // Centred, unless that would run into the time.
+        let span = button_width * buttons.len() as u16;
+        let offset = (area.width.saturating_sub(span) / 2).max(after_time);
+        let mut x = area.x + offset;
         for (act, label) in buttons {
-            let rect = Rect::new(x, area.y, BUTTON_WIDTH, 1).intersection(area);
+            let rect = Rect::new(x, area.y, button_width, 1).intersection(area);
             let style = if act == Act::Toggle { Style::new().bold() } else { Style::new().fg(DIM) };
             frame.render_widget(Line::styled(label, style).alignment(Alignment::Center), rect);
             self.buttons.push((rect, act));
-            x += BUTTON_WIDTH;
+            x += button_width;
+        }
+
+        let lit = (self.volume as usize + 5) / 10;
+        let volume = Line::from(vec![
+            Span::styled("vol ", DIM),
+            Span::raw("━".repeat(lit)),
+            Span::styled("─".repeat(10 - lit), FAINT),
+        ]);
+        if roomy && offset + span + volume.width() as u16 <= area.width {
+            flush_right(frame, area, volume);
         }
     }
 
@@ -391,9 +402,16 @@ impl App {
             format!("space · ←/→ · ↑/↓{} · q", if files.is_empty() { "" } else { " · n/p" }),
         ];
         if let Some(keys) = keys.iter().find(|k| Line::raw(k.as_str()).width() <= room) {
-            frame.render_widget(Line::styled(keys.as_str(), FAINT).alignment(Alignment::Right), area);
+            flush_right(frame, area, Line::styled(keys.as_str(), FAINT));
         }
     }
+}
+
+/// Draw `line` against the right edge of `area`, touching only the cells it
+/// covers (a `Line` restyles the whole of whatever area it is given).
+fn flush_right(frame: &mut Frame, area: Rect, line: Line) {
+    let width = (line.width() as u16).min(area.width);
+    frame.render_widget(line, Rect { x: area.right() - width, width, ..area });
 }
 
 fn centred(frame: &mut Frame, area: Rect, text: &str, color: Color) {
@@ -443,7 +461,7 @@ fn bars(buf: &mut Buffer, area: Rect, heights: &[f32], head: usize) {
 fn clock(frames: u64, total: u64) -> String {
     let rate = RATE as u64;
     let secs = frames / rate;
-    if total < 10 * rate {
+    if total > 0 && total < 10 * rate {
         format!("{}:{:02}.{}", secs / 60, secs % 60, frames % rate * 10 / rate)
     } else if total < 3600 * rate {
         format!("{}:{:02}", secs / 60, secs % 60)
@@ -489,5 +507,6 @@ mod tests {
         assert_eq!(clock(s * 3 / 2, 4 * s), "0:01.5");
         assert_eq!(clock(83 * s, 200 * s), "1:23");
         assert_eq!(clock(3723 * s, 4000 * s), "1:02:03");
+        assert_eq!(clock(0, 0), "0:00");
     }
 }

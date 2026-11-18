@@ -42,7 +42,8 @@ pub fn read_hello(r: &mut impl Read) -> io::Result<String> {
     }
     let mut name = vec![0u8; head[8] as usize];
     r.read_exact(&mut name)?;
-    Ok(String::from_utf8_lossy(&name).into_owned())
+    // The name is shown on the other side's terminal: keep it short and printable.
+    Ok(String::from_utf8_lossy(&name).chars().filter(|c| !c.is_control()).take(40).collect())
 }
 
 /// Player → listener.
@@ -189,6 +190,10 @@ mod tests {
         let mut buf = Vec::new();
         write_hello(&mut buf, "workbox").unwrap();
         assert_eq!(read_hello(&mut &buf[..]).unwrap(), "workbox");
+
+        buf.clear();
+        write_hello(&mut buf, "evil\x1b[2J\nname").unwrap();
+        assert_eq!(read_hello(&mut &buf[..]).unwrap(), "evil[2Jname");
 
         let r = Report { epoch: 3, consumed: 1 << 40, played: 12345 };
         assert_eq!(Report::read(&mut &r.to_bytes()[..]).unwrap(), r);
