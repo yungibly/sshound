@@ -5,8 +5,11 @@
 //! and how much has been heard; we top its queue up to `WINDOW` and show the
 //! heard position. Pause, volume and seek are commands, so they act at once
 //! however much audio is queued.
+//!
+//! The volume belongs to the listener, which remembers it: we show what it
+//! reports and ask it for changes.
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
@@ -27,6 +30,9 @@ const SILENCE_TIMEOUT: Duration = Duration::from_secs(3);
 pub enum Link {
     /// Not connected; trying this address.
     Waiting(String),
+    /// Something at this address took the connection and hung up without a
+    /// greeting, as a listener running another version of sshound does.
+    HungUp(String),
     /// Connected to the named machine.
     Connected(String),
 }
@@ -40,6 +46,8 @@ pub struct Status {
     /// The playhead has reached the end of the track.
     pub ended: bool,
     pub link: Link,
+    /// Volume in percent, once a listener has said what it is.
+    pub volume: Option<u8>,
 }
 
 pub struct Player {
@@ -54,7 +62,10 @@ struct Shared {
 struct State {
     pcm: Option<Arc<Vec<u8>>>,
     playing: bool,
-    volume: f32,
+    /// Volume in percent, as the listener last reported it.
+    volume: Option<u8>,
+    /// A volume asked for that the listener has not confirmed yet.
+    volume_wanted: Option<u8>,
     /// Counters below are relative to `base` and restart with each epoch.
     base: u64,
     epoch: u32,
@@ -96,7 +107,8 @@ impl Player {
             state: Mutex::new(State {
                 pcm: None,
                 playing: false,
-                volume: 1.0,
+                volume: None,
+                volume_wanted: None,
                 base: 0,
                 epoch: 0,
                 sent: 0,
@@ -145,9 +157,9 @@ impl Player {
         self.update(|s| s.rebase(frame));
     }
 
-    /// Linear gain, 0..=1.
-    pub fn set_volume(&self, volume: f32) {
-        self.update(|s| s.volume = volume.clamp(0.0, 1.0));
+    /// Ask the listener for a volume, in percent.
+    pub fn set_volume(&self, percent: u8) {
+        self.update(|s| s.volume_wanted = Some(percent.min(100)));
     }
 
     pub fn status(&self) -> Status {
@@ -157,6 +169,7 @@ impl Player {
             playing: s.playing,
             ended: s.pcm.is_some() && s.base + s.sent >= s.total() && s.played >= s.sent,
             link: s.link.clone(),
+            volume: s.volume_wanted.or(s.volume),
         }
     }
 }
@@ -188,10 +201,20 @@ fn run(shared: &Shared, targets: &[String]) {
         if shared.lock().quit {
             return;
         }
-        let Some((stream, name)) = connect(targets, &me) else {
-            let seen = shared.lock().seq;
-            shared.wait(seen, Duration::from_secs(1));
-            continue;
+        let (stream, name) = match connect(targets, &me) {
+            Ok(found) => found,
+            Err(hung_up) => {
+                let seen = {
+                    let mut s = shared.lock();
+                    s.link = match hung_up {
+                        Some(addr) => Link::HungUp(addr),
+                        None => Link::Waiting(targets.first().cloned().unwrap_or_default()),
+                    };
+                    s.seq
+                };
+                shared.wait(seen, Duration::from_secs(1));
+                continue;
+            }
         };
 
         conn += 1;
@@ -217,10 +240,15 @@ fn run(shared: &Shared, targets: &[String]) {
         s.rebase(at);
         s.conn = 0;
         s.link = Link::Waiting(targets.first().cloned().unwrap_or_default());
+        // Nothing to say about the volume until a listener does.
+        s.volume = None;
     }
 }
 
-fn connect(targets: &[String], me: &str) -> Option<(TcpStream, String)> {
+/// The first of `targets` to greet us. Failing that, a target that took the
+/// connection and hung up, if any did.
+fn connect(targets: &[String], me: &str) -> Result<(TcpStream, String), Option<String>> {
+    let mut hung_up = None;
     for target in targets {
         let Ok(addrs) = target.to_socket_addrs() else {
             continue;
@@ -236,12 +264,24 @@ fn connect(targets: &[String], me: &str) -> Option<(TcpStream, String)> {
                 proto::write_hello(&mut stream, me)?;
                 proto::read_hello(&mut stream)
             })();
-            if let Ok(name) = hello {
-                return Some((stream, name));
+            match hello {
+                Ok(name) => return Ok((stream, name)),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::InvalidData
+                    ) =>
+                {
+                    hung_up.get_or_insert_with(|| target.clone());
+                }
+                Err(_) => {}
             }
         }
     }
-    None
+    Err(hung_up)
 }
 
 fn read_reports(shared: &Shared, mut stream: TcpStream, conn: u64) {
@@ -252,11 +292,21 @@ fn read_reports(shared: &Shared, mut stream: TcpStream, conn: u64) {
             return;
         }
         match report {
-            Ok(r) if r.epoch == s.epoch => {
+            Ok(r) => {
+                match s.volume_wanted {
+                    // Sent before our change reached the listener.
+                    Some(wanted) if r.volume != wanted => {}
+                    _ => {
+                        s.volume_wanted = None;
+                        s.volume = Some(r.volume);
+                    }
+                }
+                if r.epoch != s.epoch {
+                    continue; // about audio we have since flushed
+                }
                 s.consumed = r.consumed;
                 s.played = r.played;
             }
-            Ok(_) => continue, // about audio we have since flushed
             Err(_) => s.conn = 0,
         }
         s.seq += 1;
@@ -270,7 +320,7 @@ fn read_reports(shared: &Shared, mut stream: TcpStream, conn: u64) {
 /// Push state and audio to the listener until the connection is lost.
 fn send(shared: &Shared, mut stream: &TcpStream, conn: u64) {
     let mut epoch = None;
-    let mut volume = None;
+    let mut volume_sent = None;
     let mut paused = None;
     let mut last_write = Instant::now();
     let mut out = Vec::new();
@@ -286,9 +336,11 @@ fn send(shared: &Shared, mut stream: &TcpStream, conn: u64) {
                 epoch = Some(s.epoch);
                 Cmd::Flush(s.epoch).encode(&mut out);
             }
-            if volume != Some(s.volume) {
-                volume = Some(s.volume);
-                Cmd::Volume(s.volume).encode(&mut out);
+            if let Some(wanted) = s.volume_wanted
+                && volume_sent != Some(wanted)
+            {
+                volume_sent = Some(wanted);
+                Cmd::Volume(wanted).encode(&mut out);
             }
             let want_paused = !(s.playing && s.pcm.is_some());
             if paused != Some(want_paused) {
@@ -353,7 +405,10 @@ mod tests {
     }
 
     fn connected() -> Player {
-        let addr = listen::spawn_local(true).unwrap();
+        connect_to(listen::spawn_local(true).unwrap())
+    }
+
+    fn connect_to(addr: std::net::SocketAddr) -> Player {
         let player = Player::new(vec![addr.to_string()]);
         wait_for("connection", Duration::from_secs(5), || {
             matches!(player.status().link, Link::Connected(_))
@@ -469,5 +524,48 @@ mod tests {
         wait_for("disconnect", Duration::from_secs(5), || {
             matches!(player.status().link, Link::Waiting(_))
         });
+    }
+
+    #[test]
+    fn says_when_the_listener_hangs_up_without_a_word() {
+        // What an older listener does with a hello it does not understand.
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        thread::spawn(move || {
+            for peer in l.incoming() {
+                drop(peer);
+            }
+        });
+        let player = Player::new(vec![addr.clone()]);
+        wait_for("the hang-up", Duration::from_secs(5), || {
+            player.status().link == Link::HungUp(addr.clone())
+        });
+    }
+
+    #[test]
+    fn volume_is_the_listeners_and_outlives_the_player() {
+        let dir = std::env::temp_dir().join(format!("sshound-player-{}", std::process::id()));
+        let file = dir.join("volume");
+        let addr = listen::spawn_null_saving(file.clone()).unwrap();
+
+        let first = connect_to(addr);
+        wait_for("the listener's volume", Duration::from_secs(5), || {
+            first.status().volume == Some(100)
+        });
+        first.set_volume(40);
+        assert_eq!(first.status().volume, Some(40), "shown straight away");
+        wait_for("the listener to save it", Duration::from_secs(5), || {
+            std::fs::read_to_string(&file).is_ok_and(|text| text.trim() == "40")
+        });
+        thread::sleep(Duration::from_millis(600));
+        assert_eq!(first.status().volume, Some(40), "confirmed, not undone");
+        drop(first);
+
+        // The next player hears it at the level the last one left.
+        let second = connect_to(addr);
+        wait_for("the saved volume", Duration::from_secs(5), || {
+            second.status().volume == Some(40)
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

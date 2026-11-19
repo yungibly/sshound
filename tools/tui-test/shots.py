@@ -95,9 +95,9 @@ def main():
             term.tui("mouse", "click", 40, 12)
             term.shot("paused", "0:16 / 0:42", "▶")
 
-            # The volume bar shows for a moment after a change.
+            # The volume lights up for a moment after a change.
             term.tui("key", "press", "Down", "Down", "Down", "Down")
-            term.shot("volume", "━", settle=False)
+            term.shot("volume", " 80%", settle=False)
 
             for cols, rows in ((60, 12), (44, 9), (30, 4)):
                 term.tui("resize", cols, rows)

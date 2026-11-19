@@ -27,6 +27,9 @@ pub struct Source {
     epoch: u32,
     consumed: u64,
     paused: bool,
+    /// Percent, as the listener keeps it and the player shows it.
+    level: u8,
+    /// The gain `level` stands for.
     volume: f32,
     gain: f32,
     // Resampler state, used only when the device does not run at 48 kHz.
@@ -45,6 +48,7 @@ impl Source {
             epoch: 0,
             consumed: 0,
             paused: true,
+            level: 100,
             volume: 1.0,
             gain: 0.0,
             hist: [[0.0; 2]; 4],
@@ -81,12 +85,12 @@ impl Source {
         self.paused = paused;
     }
 
-    pub fn set_volume(&mut self, volume: f32) {
-        self.volume = if volume.is_finite() {
-            volume.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+    /// Volume in percent. The gain is its square, so that equal steps
+    /// sound like equal steps.
+    pub fn set_volume(&mut self, percent: u8) {
+        self.level = percent.min(100);
+        let fraction = self.level as f32 / 100.0;
+        self.volume = fraction * fraction;
     }
 
     /// False once paused and fully faded out: the device can be stopped.
@@ -107,6 +111,7 @@ impl Source {
             epoch: self.epoch,
             consumed: self.consumed,
             played,
+            volume: self.level,
         }
     }
 
@@ -264,7 +269,8 @@ mod tests {
             Report {
                 epoch: 0,
                 consumed: 960,
-                played: 0
+                played: 0,
+                volume: 100
             }
         );
         s.fill(&mut out, 2, RATE, 960);
@@ -287,7 +293,8 @@ mod tests {
             Report {
                 epoch: 0,
                 consumed: 480,
-                played: 480
+                played: 480,
+                volume: 100
             }
         );
     }
@@ -307,7 +314,8 @@ mod tests {
             Report {
                 epoch: 5,
                 consumed: 0,
-                played: 0
+                played: 0,
+                volume: 100
             }
         );
         s.push(&pcm(2000, 1000));
@@ -318,7 +326,8 @@ mod tests {
             Report {
                 epoch: 5,
                 consumed: 480,
-                played: 0
+                played: 0,
+                volume: 100
             }
         );
         s.fill(&mut out, 2, RATE, 480);
@@ -356,6 +365,19 @@ mod tests {
             (crossings as f32 - expected).abs() <= 1.0,
             "{crossings} vs {expected}"
         );
+    }
+
+    #[test]
+    fn volume_is_a_percentage_heard_on_a_square_law() {
+        let mut s = playing();
+        s.push(&pcm(48_000, 16384));
+        s.set_volume(50);
+        assert_eq!(s.report().volume, 50);
+        let mut out = vec![0f32; 2 * 1000];
+        s.fill(&mut out, 2, RATE, 0);
+        assert!((out[2 * 999] - 0.5 * 0.25).abs() < 1e-4, "{}", out[2 * 999]);
+        s.set_volume(250);
+        assert_eq!(s.report().volume, 100);
     }
 
     #[test]

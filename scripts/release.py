@@ -39,8 +39,8 @@ FORMULA_TAIL = r'''
     begin
       sleep 2
       TCPSocket.open("127.0.0.1", port) do |socket|
-        socket.write "sshound1\x04brew"
-        assert_equal "sshound1", socket.read(8)
+        socket.write "sshound2\x04brew"
+        assert_equal "sshound2", socket.read(8)
       end
     ensure
       Process.kill("TERM", pid)

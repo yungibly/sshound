@@ -64,6 +64,11 @@ It is a plain terminal player too: run on the machine with the speakers,
 Clicking or dragging on the waveform seeks; the buttons are clickable too.
 `sshound --help` lists the keys.
 
+The volume belongs to the machine with the speakers, which remembers it: the
+next file you play there, from any machine or on that one, starts where you
+left it. It lives in `~/Library/Application Support/sshound/volume` on macOS
+and `~/.local/state/sshound/volume` (or under `$XDG_STATE_HOME`) on Linux.
+
 ## How the two ends find each other
 
 The player connects to port 7746 on the address your ssh session came from
@@ -98,6 +103,8 @@ whether to allow incoming connections the first time; say yes.
   tenth of a second per minute of audio.
 - There is no authentication beyond the network: anyone who can reach the
   listener's port (by default, devices on your tailnet) can play sound through it.
+- Both ends need the same version of sshound. If they differ, the player says
+  the listener hung up, and the listener says why.
 
 ## Development
 

@@ -1,5 +1,6 @@
 """Tests for release validation and formula generation."""
 import hashlib
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -55,9 +56,19 @@ class ReleaseTests(unittest.TestCase):
                 self.assertIn(f"{digest}  {name}", (output / "SHA256SUMS").read_text())
         # Ruby escapes and interpolation must reach the formula untouched.
         self.assertIn(r'assert_equal "sshound #{version}\n"', formula)
-        self.assertIn(r'socket.write "sshound1\x04brew"', formula)
+        self.assertIn(r'socket.write "sshound2\x04brew"', formula)
         self.assertTrue(formula.endswith("end\n"))
         self.assertIn("Second.", (output / "notes.md").read_text())
+
+    def test_smoke_tests_speak_the_current_protocol(self):
+        # The formula test and the packaging check greet a real listener; an
+        # out-of-date greeting would fail the release after it is published.
+        root = Path(__file__).resolve().parents[1]
+        proto = (root / "src/proto.rs").read_text()
+        magic = re.search(r'const MAGIC: &\[u8; 8\] = b"(sshound\d)";', proto).group(1)
+        for script in ("release.py", "package.py"):
+            text = (root / "scripts" / script).read_text()
+            self.assertEqual(set(re.findall(r"sshound\d", text)), {magic}, script)
 
     def test_a_changed_or_missing_archive_stops_the_release(self):
         packages = self.packages()
