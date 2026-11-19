@@ -1,6 +1,6 @@
 [package]
 name = "sshound"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Play audio files from a remote shell and hear them on your own machine"
 repository = "https://github.com/yungibly/sshound"
