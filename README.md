@@ -25,9 +25,12 @@ Without Homebrew, take the archive for your platform from the
 [releases](https://github.com/yungibly/sshound/releases) and copy `bin/sshound`
 onto your `PATH`, or build it with `cargo install --path .`.
 
-- **Remote machine:** needs `ffmpeg` on the `PATH` for decoding.
-- **Your machine:** needs nothing else on macOS; it plays through the default
-  output device. On Linux it plays through `pw-cat` or `aplay`.
+- **Wherever the files are:** needs `ffmpeg` on the `PATH` for decoding
+  (`brew install ffmpeg`). That is the remote machine, and your own too if you
+  play files on it.
+- **Wherever the sound comes out:** needs nothing else on macOS; it plays
+  through the default output device. On Linux it plays through `pw-cat` or
+  `aplay`.
 
 ## Use
 
@@ -43,6 +46,9 @@ Then ssh to the remote machine over Tailscale and play something:
 sshound kick.wav
 sshound album/*        # several files; things that are not audio are skipped
 ```
+
+It is a plain terminal player too: run on the machine with the speakers,
+`sshound FILE` plays right there, no listener needed.
 
 ## Controls
 
