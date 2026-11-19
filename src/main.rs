@@ -4,6 +4,7 @@ mod output;
 mod player;
 mod proto;
 mod source;
+mod tailnet;
 mod ui;
 
 use std::ffi::OsString;
@@ -21,8 +22,12 @@ sshound: play audio files from a remote shell and hear them on your own machine
   sshound listen        receive and play audio  (on the machine with the speakers)
 
 Player options:
-  --to HOST[:PORT]      where the listener is. Default: the machine you ssh'd in
-                        from, then localhost. Also read from $SSHOUND_TO.
+  --to HOST[:PORT]      where the listener is. Also read from $SSHOUND_TO.
+                        Default: the machine you ssh'd in from (or localhost,
+                        for an `ssh -R` tunnel). Outside ssh, a Tailscale device
+                        this machine is talking to, if one is listening;
+                        otherwise this machine.
+  --here                play on this machine, without looking for a listener
 
 Listener options:
   --port N              port to listen on (default 7746)
@@ -127,8 +132,16 @@ fn listen(args: Vec<OsString>) -> Result<()> {
 }
 
 fn play(args: Vec<OsString>) -> Result<()> {
-    let (named, positional) = parse(args, &[], &["--to"])?;
-    let to = named.into_iter().map(|(_, value)| value).next_back();
+    let (named, positional) = parse(args, &["--here"], &["--to"])?;
+    let here = named.iter().any(|(name, _)| name == "--here");
+    let to = named
+        .into_iter()
+        .filter(|(name, _)| name == "--to")
+        .map(|(_, value)| value)
+        .next_back();
+    if here && to.is_some() {
+        bail!("--here and --to say different things; use one");
+    }
 
     let mut files = Vec::new();
     for arg in positional {
@@ -146,27 +159,46 @@ fn play(args: Vec<OsString>) -> Result<()> {
         bail!("the player needs a terminal");
     }
 
-    let targets = match to.or_else(|| std::env::var("SSHOUND_TO").ok().filter(|s| !s.is_empty())) {
-        Some(to) => vec![with_port(&to)],
-        None => match ssh_client() {
-            // The listener binds localhost too, so an `ssh -R` tunnel works where
-            // the client is not directly reachable.
-            Some(ip) => vec![
-                SocketAddr::new(ip, proto::PORT).to_string(),
-                format!("127.0.0.1:{}", proto::PORT),
-            ],
-            // Not in an ssh session: just play here.
-            None => {
-                let addr = listen::spawn_local(false).context(
-                    "not in an ssh session and cannot play audio on this machine; \
-                     use --to HOST to send it to a machine running `sshound listen`",
-                )?;
-                vec![addr.to_string()]
-            }
-        },
+    let to = to.or_else(|| std::env::var("SSHOUND_TO").ok().filter(|s| !s.is_empty()));
+    let targets = if here {
+        None
+    } else if let Some(to) = to {
+        Some(vec![with_port(&to)])
+    } else if let Some(ip) = ssh_client() {
+        // The listener binds localhost too, so an `ssh -R` tunnel works where
+        // the client is not directly reachable.
+        Some(vec![
+            SocketAddr::new(ip, proto::PORT).to_string(),
+            format!("127.0.0.1:{}", proto::PORT),
+        ])
+    } else {
+        // Some terminals reach this machine without going through ssh. If the
+        // one you are at is listening over Tailscale, it is among the devices
+        // this machine is talking to.
+        tailnet::find_listener(proto::PORT).map(|addr| vec![addr.to_string()])
     };
 
-    ui::run(files, player::Player::new(targets))
+    match targets {
+        Some(targets) => ui::run(files, player::Player::new(targets), None),
+        None => {
+            let addr = listen::spawn_local(false).with_context(|| {
+                let found = if here {
+                    ""
+                } else {
+                    "found no `sshound listen` to send the audio to, and "
+                };
+                format!(
+                    "{found}cannot play audio on this machine; \
+                     use --to HOST to send it to a machine running `sshound listen`"
+                )
+            })?;
+            ui::run(
+                files,
+                player::Player::new(vec![addr.to_string()]),
+                Some(hostname()),
+            )
+        }
+    }
 }
 
 /// The address of the machine at the other end of this ssh session.

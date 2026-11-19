@@ -1,7 +1,7 @@
 //! `sshound listen`: accept players and play what they send.
 
 use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,7 +33,7 @@ struct Server {
 /// Run the listener in the foreground until killed.
 pub fn run(opts: Opts) -> Result<()> {
     let addrs = if opts.bind.is_empty() {
-        let tailnet = tailscale_addrs();
+        let tailnet = crate::tailnet::addrs();
         if tailnet.is_empty() {
             eprintln!(
                 "no Tailscale address found: listening on localhost only \
@@ -116,7 +116,12 @@ fn serve(mut stream: TcpStream, server: &Server) -> Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
-    let peer = proto::read_hello(&mut stream)?;
+    let peer = match proto::read_hello(&mut stream) {
+        Ok(peer) => peer,
+        // Gone without a word: a player checking that we are here.
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
 
     let source: Shared = Arc::new(Mutex::new(Source::new()));
     let output = Output::open(source.clone(), server.null).context("cannot open audio output")?;
@@ -225,26 +230,4 @@ fn keep(
     }
     // Unblocks `receive` if we are the one giving up.
     let _ = stream.shutdown(Shutdown::Both);
-}
-
-/// This machine's Tailscale addresses, found by asking the OS which local
-/// address it would use to reach Tailscale's own service address. No packets
-/// are sent.
-fn tailscale_addrs() -> Vec<IpAddr> {
-    let probe = |bind: &str, to: &str| -> Option<IpAddr> {
-        let socket = UdpSocket::bind(bind).ok()?;
-        socket.connect(to).ok()?;
-        Some(socket.local_addr().ok()?.ip())
-    };
-    let v4 = probe("0.0.0.0:0", "100.100.100.100:53").filter(|ip| match ip {
-        // 100.64.0.0/10
-        IpAddr::V4(a) => a.octets()[0] == 100 && a.octets()[1] & 0xc0 == 64,
-        _ => false,
-    });
-    let v6 = probe("[::]:0", "[fd7a:115c:a1e0::53]:53").filter(|ip| match ip {
-        // fd7a:115c:a1e0::/48
-        IpAddr::V6(a) => a.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
-        _ => false,
-    });
-    v4.into_iter().chain(v6).collect()
 }
