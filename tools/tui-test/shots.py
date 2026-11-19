@@ -112,6 +112,10 @@ def main():
 
             term.play(100, 26, here, notes)
             term.shot("failed", "Invalid data")
+
+            # Through this machine's own speakers (the listener is ignored).
+            term.play(100, 26, here, "--here", song)
+            term.shot("local", "▌▌", "playing on this machine")
         finally:
             subprocess.run([tool, "close", "--all"], env=term.env, capture_output=True)
             subprocess.run([tool, "daemon", "stop", "--all"], env=term.env, capture_output=True)

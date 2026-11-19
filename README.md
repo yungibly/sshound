@@ -64,15 +64,21 @@ The player connects to port 7746 on the address your ssh session came from
 (`$SSH_CONNECTION`), so over Tailscale there is nothing to configure. The
 listener only accepts connections on its Tailscale address and on localhost.
 
+Some terminals start shells on the remote machine without going through ssh
+(they run a server of their own there), and so leave no `$SSH_CONNECTION`. Then
+the player asks `tailscale status` which devices this machine has been talking
+to in the last few minutes, the one you are at among them, and tries port 7746
+on each. If none answers, it plays on the machine it is on and says so next to
+the file name.
+
 If that does not fit your setup:
 
 - `sshound --to HOST[:PORT] FILE` (or `$SSHOUND_TO`) names the listener explicitly.
+- `sshound --here FILE` plays on the machine it is on, without looking.
 - `sshound listen --bind ADDR` listens somewhere else, e.g. `--bind 0.0.0.0`
   if you ssh over the LAN rather than Tailscale.
 - Without Tailscale, forward the port instead: `ssh -R 7746:localhost:7746 host`.
   The player falls back to localhost when the direct address does not answer.
-
-Run outside an ssh session, `sshound FILE` just plays on the machine it is on.
 
 If the player says it is waiting for `sshound listen`, the listener is not
 running or not reachable at the address shown. On macOS, the firewall may ask

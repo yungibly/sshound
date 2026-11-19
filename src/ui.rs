@@ -82,6 +82,9 @@ struct App {
     direction: isize,
     view: View,
     player: Player,
+    /// This machine's name, when the sound comes out of its own speakers
+    /// rather than being sent to a listener.
+    here: Option<String>,
     /// Percent.
     volume: u8,
     volume_changed: Option<Instant>,
@@ -95,7 +98,8 @@ struct App {
     quit: bool,
 }
 
-pub fn run(files: Vec<PathBuf>, player: Player) -> Result<()> {
+/// `here` is this machine's name if `player` plays through its own speakers.
+pub fn run(files: Vec<PathBuf>, player: Player, here: Option<String>) -> Result<()> {
     let mut terminal = ratatui::init();
     // ratatui's panic hook restores the screen; make sure the mouse goes back too.
     let hook = std::panic::take_hook();
@@ -111,6 +115,7 @@ pub fn run(files: Vec<PathBuf>, player: Player) -> Result<()> {
         direction: 1,
         view: View::Loading,
         player,
+        here,
         volume: 100,
         volume_changed: None,
         decoded: mpsc::channel(),
@@ -366,27 +371,9 @@ impl App {
             .unwrap_or(path.as_os_str())
             .to_string_lossy();
 
-        // The right-hand side is for what needs saying: that nothing can be
-        // heard yet, or else where we are in a list of files. Each has shorter
-        // forms for narrow windows.
-        let waiting =
-            |text: String| Line::from(vec![Span::styled("○ ", WARN), Span::styled(text, DIM)]);
-        let asides = match &status.link {
-            Link::Waiting(addr) => vec![
-                waiting(format!("waiting for `sshound listen` on {addr}")),
-                waiting("no listener".into()),
-                Line::styled("○", WARN),
-            ],
-            Link::Connected(_) if self.files.len() > 1 => {
-                vec![Line::styled(
-                    format!("{}/{}", self.idx + 1, self.files.len()),
-                    DIM,
-                )]
-            }
-            Link::Connected(_) => vec![],
-        };
         let mut name_width = area.width;
-        if let Some(aside) = asides
+        let count = (self.files.len() > 1).then_some((self.idx + 1, self.files.len()));
+        if let Some(aside) = asides(&status.link, self.here.as_deref(), count)
             .into_iter()
             .find(|aside| aside.width() as u16 + 12 <= area.width)
         {
@@ -492,6 +479,39 @@ fn head(status: &Status, frames: u64, count: usize) -> usize {
     } else {
         (status.pos as u128 * count as u128 / frames.max(1) as u128) as usize
     }
+}
+
+/// What goes on the right of the title, longest form first: that nothing can
+/// be heard yet, or else that the sound is playing on this machine (`here`)
+/// and where we are in a list of files (`count`).
+fn asides(link: &Link, here: Option<&str>, count: Option<(usize, usize)>) -> Vec<Line<'static>> {
+    if let Link::Waiting(addr) = link {
+        let waiting =
+            |text: String| Line::from(vec![Span::styled("○ ", WARN), Span::styled(text, DIM)]);
+        return vec![
+            waiting(format!("waiting for `sshound listen` on {addr}")),
+            waiting("no listener".into()),
+            Line::styled("○", WARN),
+        ];
+    }
+    let places = match here {
+        Some(host) => vec![
+            Some(format!("playing on this machine ({host})")),
+            Some(format!("playing on {host}")),
+            Some("local".into()),
+            None,
+        ],
+        None => vec![None],
+    };
+    let count = count.map(|(at, of)| format!("{at}/{of}"));
+    places
+        .into_iter()
+        .filter_map(|place| match (place, &count) {
+            (Some(place), Some(count)) => Some(format!("{place} · {count}")),
+            (place, count) => place.or(count.clone()),
+        })
+        .map(|text| Line::styled(text, DIM))
+        .collect()
 }
 
 /// Draw `line` against the right edge of `area`, touching only the cells it
@@ -622,6 +642,38 @@ mod tests {
         // Eighths of the single row on each side: 2, 3, 5, 6, 7.
         bars(&mut buf, area, &[0.25, 0.375, 0.625, 0.75, 0.875], 0);
         assert_eq!(rows(&buf), ["▂ ▃ ▅ ▆ ▇", "▔ ▀ ▀ █ █"]);
+    }
+
+    #[test]
+    fn title_says_when_the_sound_stays_on_this_machine() {
+        let text = |link: &Link, here, count| -> Vec<String> {
+            asides(link, here, count)
+                .iter()
+                .map(|line| line.to_string())
+                .collect()
+        };
+        let connected = Link::Connected("studio".into());
+        assert!(text(&connected, None, None).is_empty());
+        assert_eq!(text(&connected, None, Some((2, 5))), ["2/5"]);
+        assert_eq!(
+            text(&connected, Some("box"), None),
+            ["playing on this machine (box)", "playing on box", "local"]
+        );
+        assert_eq!(
+            text(&connected, Some("box"), Some((1, 3))),
+            [
+                "playing on this machine (box) · 1/3",
+                "playing on box · 1/3",
+                "local · 1/3",
+                "1/3"
+            ]
+        );
+        // Nothing can be heard: that matters more than where it would be.
+        let waiting = Link::Waiting("127.0.0.1:7746".into());
+        assert_eq!(
+            text(&waiting, Some("box"), Some((1, 3)))[1],
+            "○ no listener"
+        );
     }
 
     #[test]
