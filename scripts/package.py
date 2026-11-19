@@ -36,9 +36,9 @@ def smoke_test(binary, version):
                     raise
                 time.sleep(0.1)
         with peer:
-            peer.sendall(b"sshound1\x07package")
+            peer.sendall(b"sshound2\x07package")
             reply = peer.recv(8, socket.MSG_WAITALL)
-            assert reply == b"sshound1", reply
+            assert reply == b"sshound2", reply
     finally:
         listener.terminate()
         listener.wait()

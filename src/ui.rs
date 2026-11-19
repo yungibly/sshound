@@ -37,7 +37,7 @@ const BAD: Color = Color::Indexed(203);
 
 const MAX_WIDTH: u16 = 160;
 const MAX_WAVE_ROWS: u16 = 12;
-/// How long the volume stays on screen after a change.
+/// How long the volume stays lit after a change.
 const VOLUME_SHOWN: Duration = Duration::from_millis(1500);
 
 /// One-eighth steps of a cell, filled from the bottom.
@@ -66,7 +66,8 @@ struct Picture {
     head: usize,
     playing: bool,
     link: Link,
-    volume: Option<u8>,
+    /// The level, and whether it is lit.
+    volume: Option<(u8, bool)>,
 }
 
 enum View {
@@ -85,8 +86,6 @@ struct App {
     /// This machine's name, when the sound comes out of its own speakers
     /// rather than being sent to a listener.
     here: Option<String>,
-    /// Percent.
-    volume: u8,
     volume_changed: Option<Instant>,
     decoded: (Sender<Decoded>, Receiver<Decoded>),
     load_id: u64,
@@ -116,7 +115,6 @@ pub fn run(files: Vec<PathBuf>, player: Player, here: Option<String>) -> Result<
         view: View::Loading,
         player,
         here,
-        volume: 100,
         volume_changed: None,
         decoded: mpsc::channel(),
         load_id: 0,
@@ -232,11 +230,11 @@ impl App {
             head: head(status, total, bar_count(wave_width(size.width))),
             playing: status.playing,
             link: status.link.clone(),
-            volume: self.volume_visible().then_some(self.volume),
+            volume: status.volume.map(|v| (v, self.volume_lit())),
         }
     }
 
-    fn volume_visible(&self) -> bool {
+    fn volume_lit(&self) -> bool {
         self.volume_changed
             .is_some_and(|at| at.elapsed() < VOLUME_SHOWN)
     }
@@ -280,27 +278,28 @@ impl App {
         }
     }
 
-    fn set_volume(&mut self, percent: i16) {
-        self.volume = percent.clamp(0, 100) as u8;
-        self.volume_changed = Some(Instant::now());
-        // Squared, so the steps sound even.
-        let gain = self.volume as f32 / 100.0;
-        self.player.set_volume(gain * gain);
+    /// Nudge the volume by `step` percent. Until a listener has said what it
+    /// is, there is nothing to nudge.
+    fn nudge_volume(&mut self, step: i16) {
+        if let Some(volume) = self.player.status().volume {
+            let volume = (volume as i16 + step).clamp(0, 100) as u8;
+            self.player.set_volume(volume);
+            self.volume_changed = Some(Instant::now());
+        }
     }
 
     fn on_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        let volume = self.volume as i16;
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char(' ') | KeyCode::Enter => self.act(Act::Toggle),
             KeyCode::Left | KeyCode::Char('h') => self.act(Act::Back),
             KeyCode::Right | KeyCode::Char('l') => self.act(Act::Forward),
-            KeyCode::Up | KeyCode::Char('k' | '+' | '=') => self.set_volume(volume + 5),
-            KeyCode::Down | KeyCode::Char('j' | '-') => self.set_volume(volume - 5),
+            KeyCode::Up | KeyCode::Char('k' | '+' | '=') => self.nudge_volume(5),
+            KeyCode::Down | KeyCode::Char('j' | '-') => self.nudge_volume(-5),
             KeyCode::Home | KeyCode::Char('0') => self.player.seek(0),
             KeyCode::Char('n') => self.act(Act::Next),
             KeyCode::Char('p') => self.act(Act::Prev),
@@ -447,16 +446,17 @@ impl App {
             x += button_width;
         }
 
-        // The volume only shows while it is being changed.
-        if self.volume_visible() {
-            let steps = if roomy { 20 } else { 10 };
-            let lit = self.volume as usize * steps / 100;
-            let volume = Line::from(vec![
-                Span::raw("━".repeat(lit)),
-                Span::styled("─".repeat(steps - lit), FAINT),
-            ]);
-            if offset + span + volume.width() as u16 <= area.width {
-                flush_right(frame, area, volume);
+        // The volume, lit up for a moment when it changes. It is the
+        // listener's, so it is missing until one has answered.
+        if let Some(volume) = status.volume {
+            let lit = if self.volume_lit() { HEAD } else { DIM };
+            let room = area.width.saturating_sub(offset + span);
+            let fits = [(20, true), (10, true), (10, false)]
+                .into_iter()
+                .map(|(steps, percent)| volume_bar(volume, steps, percent, lit))
+                .find(|bar| bar.width() as u16 + 2 <= room);
+            if let Some(bar) = fits {
+                flush_right(frame, area, bar);
             }
         }
     }
@@ -481,18 +481,44 @@ fn head(status: &Status, frames: u64, count: usize) -> usize {
     }
 }
 
+/// `steps` cells of bar for a `volume` in percent, with the number after it
+/// if `percent`.
+fn volume_bar(volume: u8, steps: usize, percent: bool, lit: Color) -> Line<'static> {
+    let on = (volume as usize * steps).div_ceil(100);
+    let mut spans = vec![
+        Span::styled("━".repeat(on), lit),
+        Span::styled("─".repeat(steps - on), FAINT),
+    ];
+    if percent {
+        spans.push(Span::styled(format!(" {volume:>3}%"), DIM));
+    }
+    Line::from(spans)
+}
+
 /// What goes on the right of the title, longest form first: that nothing can
 /// be heard yet, or else that the sound is playing on this machine (`here`)
 /// and where we are in a list of files (`count`).
 fn asides(link: &Link, here: Option<&str>, count: Option<(usize, usize)>) -> Vec<Line<'static>> {
-    if let Link::Waiting(addr) = link {
-        let waiting =
-            |text: String| Line::from(vec![Span::styled("○ ", WARN), Span::styled(text, DIM)]);
-        return vec![
-            waiting(format!("waiting for `sshound listen` on {addr}")),
-            waiting("no listener".into()),
-            Line::styled("○", WARN),
-        ];
+    let waiting =
+        |text: String| Line::from(vec![Span::styled("○ ", WARN), Span::styled(text, DIM)]);
+    match link {
+        Link::Waiting(addr) => {
+            return vec![
+                waiting(format!("waiting for `sshound listen` on {addr}")),
+                waiting("no listener".into()),
+                Line::styled("○", WARN),
+            ];
+        }
+        Link::HungUp(addr) => {
+            return vec![
+                waiting(format!(
+                    "{addr} hung up: is it running this version of sshound?"
+                )),
+                waiting("listener hung up".into()),
+                Line::styled("○", WARN),
+            ];
+        }
+        Link::Connected(_) => {}
     }
     let places = match here {
         Some(host) => vec![
@@ -668,12 +694,26 @@ mod tests {
                 "1/3"
             ]
         );
+        let hung_up = Link::HungUp("studio:7746".into());
+        assert_eq!(
+            text(&hung_up, None, None)[0],
+            "○ studio:7746 hung up: is it running this version of sshound?"
+        );
         // Nothing can be heard: that matters more than where it would be.
         let waiting = Link::Waiting("127.0.0.1:7746".into());
         assert_eq!(
             text(&waiting, Some("box"), Some((1, 3)))[1],
             "○ no listener"
         );
+    }
+
+    #[test]
+    fn volume_bar_never_looks_silent_unless_it_is() {
+        let bar = |volume, steps, percent| volume_bar(volume, steps, percent, DIM).to_string();
+        assert_eq!(bar(100, 10, true), "━━━━━━━━━━ 100%");
+        assert_eq!(bar(5, 10, false), "━─────────");
+        assert_eq!(bar(0, 10, true), "──────────   0%");
+        assert_eq!(bar(55, 20, true).chars().filter(|&c| c == '━').count(), 11);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 //! `sshound listen`: accept players and play what they send.
 
+use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,6 +17,8 @@ use crate::source::{MAX_QUEUE, Source};
 
 const MAX_PLAYERS: usize = 8;
 const TIMEOUT: Duration = Duration::from_secs(5);
+/// Volume in percent until one has been set.
+const DEFAULT_VOLUME: u8 = 100;
 
 pub struct Opts {
     pub port: u16,
@@ -28,6 +32,8 @@ struct Server {
     null: bool,
     log: bool,
     players: Arc<AtomicUsize>,
+    /// Where the volume is kept between players; none when discarding audio.
+    volume_file: Option<PathBuf>,
 }
 
 /// Run the listener in the foreground until killed.
@@ -57,6 +63,7 @@ pub fn run(opts: Opts) -> Result<()> {
         null: opts.null,
         log: true,
         players: Arc::new(AtomicUsize::new(0)),
+        volume_file: volume_file().filter(|_| !opts.null),
     };
     let mut threads = Vec::new();
     for ip in addrs {
@@ -75,6 +82,18 @@ pub fn run(opts: Opts) -> Result<()> {
 
 /// Start a private listener on localhost for playing on this machine.
 pub fn spawn_local(null: bool) -> Result<SocketAddr> {
+    // The same volume as `sshound listen` keeps, so that playing here sounds
+    // the same as playing from elsewhere.
+    spawn_private(null, volume_file().filter(|_| !null))
+}
+
+/// A private listener that discards the audio but keeps its volume in `file`.
+#[cfg(test)]
+pub fn spawn_null_saving(file: PathBuf) -> Result<SocketAddr> {
+    spawn_private(true, Some(file))
+}
+
+fn spawn_private(null: bool, volume_file: Option<PathBuf>) -> Result<SocketAddr> {
     Output::open(Arc::new(Mutex::new(Source::new())), null)?;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let addr = listener.local_addr()?;
@@ -83,6 +102,7 @@ pub fn spawn_local(null: bool) -> Result<SocketAddr> {
         null,
         log: false,
         players: Arc::new(AtomicUsize::new(0)),
+        volume_file,
     };
     thread::spawn(move || accept(listener, server));
     Ok(addr)
@@ -124,6 +144,11 @@ fn serve(mut stream: TcpStream, server: &Server) -> Result<()> {
     };
 
     let source: Shared = Arc::new(Mutex::new(Source::new()));
+    // Read afresh for every player: another process may have changed it.
+    source
+        .lock()
+        .expect("audio source lock")
+        .set_volume(load_volume(server.volume_file.as_deref()));
     let output = Output::open(source.clone(), server.null).context("cannot open audio output")?;
     proto::write_hello(&mut stream, &server.name)?;
     if server.log {
@@ -140,7 +165,7 @@ fn serve(mut stream: TcpStream, server: &Server) -> Result<()> {
         );
         thread::spawn(move || keep(stream, source, output, null, done))
     };
-    let result = receive(&mut stream, &source);
+    let result = receive(&mut stream, &source, server);
     done.store(true, Ordering::Relaxed);
     let _ = keeper.join();
     if server.log {
@@ -150,8 +175,9 @@ fn serve(mut stream: TcpStream, server: &Server) -> Result<()> {
 }
 
 /// Apply the player's commands until it goes away.
-fn receive(stream: &mut TcpStream, source: &Shared) -> Result<()> {
+fn receive(stream: &mut TcpStream, source: &Shared, server: &Server) -> Result<()> {
     let lock = || source.lock().expect("audio source lock");
+    let mut save_failed = false;
     loop {
         let cmd = match Cmd::read(stream) {
             Ok(cmd) => cmd,
@@ -179,7 +205,17 @@ fn receive(stream: &mut TcpStream, source: &Shared) -> Result<()> {
             }
             Cmd::Flush(epoch) => lock().flush(epoch),
             Cmd::Pause(on) => lock().set_paused(on),
-            Cmd::Volume(v) => lock().set_volume(v),
+            Cmd::Volume(v) => {
+                lock().set_volume(v);
+                if let Some(path) = &server.volume_file
+                    && let Err(e) = save_volume(path, v)
+                    && server.log
+                    && !save_failed
+                {
+                    save_failed = true;
+                    eprintln!("cannot save the volume in {}: {e}", path.display());
+                }
+            }
             Cmd::Ping => {}
         }
     }
@@ -230,4 +266,68 @@ fn keep(
     }
     // Unblocks `receive` if we are the one giving up.
     let _ = stream.shutdown(Shutdown::Both);
+}
+
+/// Where the volume is kept, for `sshound listen` and for playing on this
+/// machine alike.
+fn volume_file() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute());
+    let dir = if cfg!(target_os = "macos") {
+        home?.join("Library/Application Support")
+    } else {
+        match std::env::var_os("XDG_STATE_HOME").map(PathBuf::from) {
+            Some(dir) if dir.is_absolute() => dir,
+            _ => home?.join(".local/state"),
+        }
+    };
+    Some(dir.join("sshound/volume"))
+}
+
+fn load_volume(path: Option<&Path>) -> u8 {
+    path.and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| text.trim().parse::<u8>().ok())
+        .map_or(DEFAULT_VOLUME, |percent| percent.min(100))
+}
+
+/// Replace the file in one step, so that a reader never sees half of it.
+fn save_volume(path: &Path, percent: u8) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let partial = path.with_extension(format!("{}.partial", std::process::id()));
+    fs::write(&partial, format!("{percent}\n"))?;
+    fs::rename(&partial, path).inspect_err(|_| {
+        let _ = fs::remove_file(&partial);
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn volume_survives_in_a_file() {
+        let dir = std::env::temp_dir().join(format!("sshound-volume-{}", std::process::id()));
+        let path = dir.join("state/sshound/volume");
+        assert_eq!(
+            load_volume(Some(&path)),
+            DEFAULT_VOLUME,
+            "nothing saved yet"
+        );
+        assert_eq!(load_volume(None), DEFAULT_VOLUME);
+
+        save_volume(&path, 35).unwrap();
+        assert_eq!(load_volume(Some(&path)), 35);
+        save_volume(&path, 80).unwrap();
+        assert_eq!(load_volume(Some(&path)), 80);
+        assert_eq!(fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+
+        fs::write(&path, "loud\n").unwrap();
+        assert_eq!(load_volume(Some(&path)), DEFAULT_VOLUME);
+        fs::write(&path, "-3").unwrap();
+        assert_eq!(load_volume(Some(&path)), DEFAULT_VOLUME);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

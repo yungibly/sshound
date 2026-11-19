@@ -9,7 +9,12 @@
 - When the sound plays on the machine the player runs on, the player says so
   next to the file name.
 - `--here` plays on this machine without looking for a listener.
+- The volume is always on screen, and the machine with the speakers remembers
+  it: playing there from anywhere, or on that machine itself, starts at the
+  level you last left it.
 - The listener no longer logs connections that close without a word.
+- The protocol has changed, so update both ends together. A player that meets
+  an older listener says the listener hung up instead of waiting in silence.
 
 ## v0.1.0
 

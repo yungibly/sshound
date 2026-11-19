@@ -4,6 +4,8 @@
 //! The player connects, both sides exchange a hello, then the player sends
 //! framed commands while the listener streams back fixed-size position reports.
 //! Audio is always 48 kHz stereo signed 16-bit little-endian.
+//!
+//! The hello names the protocol version, and both ends must speak the same one.
 
 use std::io::{self, Read, Write};
 
@@ -12,7 +14,8 @@ pub const RATE: u32 = 48_000;
 /// Bytes per audio frame (two s16 samples).
 pub const FRAME: usize = 4;
 
-const MAGIC: &[u8; 8] = b"sshound1";
+/// "sshound" and the protocol version.
+const MAGIC: &[u8; 8] = b"sshound2";
 const MAX_PAYLOAD: usize = 1 << 20;
 
 const T_AUDIO: u8 = 1;
@@ -38,7 +41,11 @@ pub fn read_hello(r: &mut impl Read) -> io::Result<String> {
     let mut head = [0u8; 9];
     r.read_exact(&mut head)?;
     if &head[..8] != MAGIC {
-        return Err(bad("not an sshound peer"));
+        return Err(bad(if head[..7] == MAGIC[..7] {
+            "the other end runs a different version of sshound; update both"
+        } else {
+            "not an sshound peer"
+        }));
     }
     let mut name = vec![0u8; head[8] as usize];
     r.read_exact(&mut name)?;
@@ -58,8 +65,8 @@ pub enum Cmd {
     /// Drop everything queued and start a new epoch (sent on seek).
     Flush(u32),
     Pause(bool),
-    /// Linear gain, 0..=1.
-    Volume(f32),
+    /// Volume in percent, 0..=100.
+    Volume(u8),
     Ping,
 }
 
@@ -87,8 +94,8 @@ impl Cmd {
                 out.push(*on as u8);
             }
             Cmd::Volume(v) => {
-                header(out, T_VOLUME, 4);
-                out.extend_from_slice(&v.to_le_bytes());
+                header(out, T_VOLUME, 1);
+                out.push(*v);
             }
             Cmd::Ping => header(out, T_PING, 0),
         }
@@ -109,16 +116,14 @@ impl Cmd {
                 body[0], body[1], body[2], body[3],
             ]))),
             (T_PAUSE, 1) => Ok(Cmd::Pause(body[0] != 0)),
-            (T_VOLUME, 4) => Ok(Cmd::Volume(f32::from_le_bytes([
-                body[0], body[1], body[2], body[3],
-            ]))),
+            (T_VOLUME, 1) => Ok(Cmd::Volume(body[0].min(100))),
             (T_PING, 0) => Ok(Cmd::Ping),
             _ => Err(bad("malformed message")),
         }
     }
 }
 
-/// Listener → player: where playback actually is.
+/// Listener → player: where playback actually is, and how loud.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Report {
     /// Epoch these counters belong to (they restart at zero on every flush).
@@ -127,16 +132,20 @@ pub struct Report {
     pub consumed: u64,
     /// Frames that have reached the speakers. Drives the playhead.
     pub played: u64,
+    /// Volume in percent. The listener keeps it, so that it is the same
+    /// whichever player is playing through it.
+    pub volume: u8,
 }
 
 impl Report {
-    pub const SIZE: usize = 20;
+    pub const SIZE: usize = 21;
 
     pub fn to_bytes(self) -> [u8; Self::SIZE] {
         let mut b = [0u8; Self::SIZE];
         b[..4].copy_from_slice(&self.epoch.to_le_bytes());
         b[4..12].copy_from_slice(&self.consumed.to_le_bytes());
-        b[12..].copy_from_slice(&self.played.to_le_bytes());
+        b[12..20].copy_from_slice(&self.played.to_le_bytes());
+        b[20] = self.volume;
         b
     }
 
@@ -146,7 +155,8 @@ impl Report {
         Ok(Report {
             epoch: u32::from_le_bytes(b[..4].try_into().unwrap()),
             consumed: u64::from_le_bytes(b[4..12].try_into().unwrap()),
-            played: u64::from_le_bytes(b[12..].try_into().unwrap()),
+            played: u64::from_le_bytes(b[12..20].try_into().unwrap()),
+            volume: b[20].min(100),
         })
     }
 }
@@ -161,7 +171,7 @@ mod tests {
             Cmd::Audio(vec![1, 2, 3, 4, 5, 6, 7, 8]),
             Cmd::Flush(7),
             Cmd::Pause(true),
-            Cmd::Volume(0.25),
+            Cmd::Volume(25),
             Cmd::Ping,
         ];
         let mut buf = Vec::new();
@@ -186,7 +196,11 @@ mod tests {
         // A length that would make us allocate gigabytes.
         assert!(Cmd::read(&mut &[T_AUDIO, 0xff, 0xff, 0xff, 0x7f][..]).is_err());
         // Wrong greeting.
-        assert!(read_hello(&mut &b"GET / HTTP/1.1\r\n"[..]).is_err());
+        let e = read_hello(&mut &b"GET / HTTP/1.1\r\n"[..]).unwrap_err();
+        assert_eq!(e.to_string(), "not an sshound peer");
+        // Another version of us.
+        let e = read_hello(&mut &b"sshound1\x03box"[..]).unwrap_err();
+        assert!(e.to_string().contains("different version"), "{e}");
     }
 
     #[test]
@@ -203,6 +217,7 @@ mod tests {
             epoch: 3,
             consumed: 1 << 40,
             played: 12345,
+            volume: 64,
         };
         assert_eq!(Report::read(&mut &r.to_bytes()[..]).unwrap(), r);
     }
