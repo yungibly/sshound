@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.2.0
+
+- Without an ssh session to go by, the player looks for `sshound listen` on the
+  Tailscale devices this machine is talking to before it falls back to playing
+  where it is. Terminals that start shells on the remote machine without going
+  through ssh now send the sound to you, as an ssh session does.
+- When the sound plays on the machine the player runs on, the player says so
+  next to the file name.
+- `--here` plays on this machine without looking for a listener.
+- The listener no longer logs connections that close without a word.
+
 ## v0.1.0
 
 First release.
